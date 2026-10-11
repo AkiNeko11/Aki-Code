@@ -2,29 +2,26 @@ from __future__ import annotations
 
 import os
 
-from aki_code.tools.bash import Tool
+from aki_code.tools.base import BaseTool
 
 
-class FileWriteTool(Tool):
-    def __init__(self):
-        super().__init__(
-            name="file_write",
-            description="Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories.",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "The path to the file to write",
-                    },
-                    "content": {
-                        "type": "string",
-                        "description": "The content to write to the file",
-                    },
-                },
-                "required": ["path", "content"],
+class WriteFileTool(BaseTool):
+    name = "write_file"
+    description = "Write content to a file. Creates file and parent directories if needed. Overwrites existing content."
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Path to the file to write",
             },
-        )
+            "content": {
+                "type": "string",
+                "description": "Content to write",
+            },
+        },
+        "required": ["path", "content"],
+    }
 
     def execute(self, *, path: str, content: str) -> str:
         try:

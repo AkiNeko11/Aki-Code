@@ -2,25 +2,22 @@ from __future__ import annotations
 
 import os
 
-from aki_code.tools.bash import Tool
+from aki_code.tools.base import BaseTool
 
 
-class FileReadTool(Tool):
-    def __init__(self):
-        super().__init__(
-            name="file_read",
-            description="Read the contents of a file. Returns the file content with line numbers.",
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "The path to the file to read (absolute or relative to current directory)",
-                    },
-                },
-                "required": ["path"],
+class ReadFileTool(BaseTool):
+    name = "read_file"
+    description = "Read the contents of a file. Returns content with line numbers."
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Path to the file to read",
             },
-        )
+        },
+        "required": ["path"],
+    }
 
     def execute(self, *, path: str) -> str:
         if not os.path.exists(path):

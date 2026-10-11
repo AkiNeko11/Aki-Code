@@ -52,7 +52,7 @@ ASK_RULES_RAW = [
 ASK_RULES = [re.compile(p, re.IGNORECASE) for p in ASK_RULES_RAW]
 
 # Tools that are read-only / side-effect-free and always auto-allowed.
-SAFE_TOOLS_AUTO = {"file_read"}
+SAFE_TOOLS_AUTO = {"read_file", "glob"}
 
 
 class PermissionManager:
@@ -97,9 +97,11 @@ class PermissionManager:
 
     def _extract_paths_from_args(self, tool_name: str, args: dict) -> list[str]:
         path_keys = {
-            "file_read": ["path"],
-            "file_write": ["path"],
+            "read_file": ["path"],
+            "write_file": ["path"],
+            "edit_file": ["path"],
             "bash": [],
+            "glob": ["path"],
         }
         keys = path_keys.get(tool_name, [])
         return [args[k] for k in keys if k in args and args[k]]
@@ -156,7 +158,7 @@ class PermissionManager:
                     return "ask", f"Command matches approval rule: {pattern.pattern}"
 
         # Layer 2, Level 3: File-write tools always need confirmation.
-        if tool_name == "file_write":
+        if tool_name in ("write_file", "edit_file"):
             return "ask", f"File modification: {args.get('path', 'unknown')}"
 
         return "allow", "Passed all checks"

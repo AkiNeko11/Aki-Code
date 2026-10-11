@@ -3,7 +3,7 @@ from rich.console import Console
 from aki_code import config
 from aki_code.llm.client import get_client
 from aki_code.llm.prompts import SYSTEM_PROMPT
-from aki_code.tools.registry import create_default_registry
+from aki_code.tools import create_registry
 from aki_code.security.permission import PermissionManager
 from aki_code.hooks.manager import HookManager, HookEvent
 from aki_code.hooks.builtin import register_builtin_hooks
@@ -52,7 +52,7 @@ def run() -> None:
         raise SystemExit(1)
 
     client = get_client()
-    registry = create_default_registry()
+    registry = create_registry()
     messages: list[dict] = []
 
     console.print("[bold green]Aki-Code[/bold green] — coding assistant")

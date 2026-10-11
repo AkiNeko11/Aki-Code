@@ -6,7 +6,6 @@ from aki_code.hooks.manager import HookContext, HookEvent, HookManager
 
 
 def logging_hook(ctx: HookContext) -> None:
-    event = ctx.event.value
     data = ctx.data
 
     if ctx.event == HookEvent.PRE_TOOL_USE:

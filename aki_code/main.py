@@ -9,7 +9,6 @@ from aki_code.hooks.manager import HookManager, HookEvent
 from aki_code.hooks.builtin import register_builtin_hooks
 
 console = Console()
-permission_manager = PermissionManager()
 hook_manager = HookManager()
 register_builtin_hooks(hook_manager)
 
@@ -53,7 +52,10 @@ def run() -> None:
 
     client = get_client()
     registry = create_registry()
+    permission_manager = PermissionManager()
     messages: list[dict] = []
+
+    registry.setup_all()
 
     console.print("[bold green]Aki-Code[/bold green] — coding assistant")
     console.print("[dim]Ctrl+C to exit[/dim]\n")
@@ -138,6 +140,8 @@ def run() -> None:
                 messages.pop()
             if messages:
                 messages.pop()
+
+    registry.teardown_all()
 
 
 def main() -> None:

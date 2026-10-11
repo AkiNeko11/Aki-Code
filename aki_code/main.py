@@ -3,7 +3,10 @@ from rich.console import Console
 from aki_code import config
 from aki_code.llm.client import get_client, call_with_retry
 from aki_code.llm.prompts import SYSTEM_PROMPT
+from aki_code.llm.usage import TokenTracker
 from aki_code.tools import create_registry
+from aki_code.commands import create_command_registry
+from aki_code.commands.base import CommandAction, CommandContext
 from aki_code.security.permission import PermissionManager
 from aki_code.hooks.manager import HookManager, HookEvent
 from aki_code.hooks.builtin import register_builtin_hooks
@@ -67,13 +70,17 @@ def run() -> None:
 
     client = get_client()
     registry = create_registry()
+    command_registry = create_command_registry()
     permission_manager = PermissionManager()
     messages: list[dict] = []
+
+    token_tracker = TokenTracker()
+    hook_manager.register(HookEvent.POST_LLM_CALL, token_tracker.on_post_llm_call)
 
     registry.setup_all()
 
     console.print("[bold green]Aki-Code[/bold green] — coding assistant")
-    console.print("[dim]Ctrl+C to exit[/dim]\n")
+    console.print("[dim]/help for commands, /exit to quit[/dim]\n")
 
     while True:
         # A dangling user message means the previous turn failed after retries.
@@ -89,6 +96,18 @@ def run() -> None:
         if user_input is None:
             console.print("\n[dim]Bye![/dim]")
             break
+
+        # Slash commands are intercepted before anything touches the conversation.
+        if user_input.startswith("/"):
+            ctx = CommandContext(
+                console=console,
+                messages=messages,
+                token_tracker=token_tracker,
+                commands=command_registry,
+            )
+            if command_registry.dispatch(user_input, ctx).action == CommandAction.EXIT:
+                break
+            continue
 
         if retrying:
             if user_input:

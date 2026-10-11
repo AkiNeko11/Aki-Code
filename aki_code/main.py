@@ -1,0 +1,126 @@
+from rich.console import Console
+
+from aki_code import config
+from aki_code.llm.client import get_client
+from aki_code.llm.prompts import SYSTEM_PROMPT
+from aki_code.tools.registry import create_default_registry
+from aki_code.security.permission import PermissionChecker, PermissionLevel
+
+console = Console()
+permission_checker = PermissionChecker()
+
+
+def _request_permission(tool_name: str, tool_input: dict) -> bool:
+    console.print(f"  [yellow]⚠ {tool_name}[/yellow]({tool_input})")
+    answer = console.input("  [yellow]Allow? (y/n): [/yellow]").strip().lower()
+    return answer.startswith("y")
+
+
+def _display_tool_result(result: str) -> None:
+    preview = result if len(result) <= 500 else result[:500] + "..."
+    console.print(f"  [dim]← {preview}[/dim]")
+
+
+def _call_llm(client, messages, tools):
+    """Call LLM with streaming. Prints text as it arrives, returns full response."""
+    has_text = False
+    with client.messages.stream(
+        model=config.MODEL,
+        max_tokens=config.MAX_TOKENS,
+        system=SYSTEM_PROMPT,
+        messages=messages,
+        tools=tools,
+    ) as stream:
+        for text in stream.text_stream:
+            console.print(text, end="", markup=False)
+            has_text = True
+        response = stream.get_final_message()
+    if has_text:
+        console.print()
+    return response
+
+
+def run() -> None:
+    if not config.API_KEY:
+        console.print("[bold red]Error:[/bold red] DEEPSEEK_API_KEY not set.")
+        console.print("Copy .env.example to .env and fill in your API key.")
+        raise SystemExit(1)
+
+    client = get_client()
+    registry = create_default_registry()
+    messages: list[dict] = []
+
+    console.print("[bold green]Aki-Code[/bold green] — coding assistant")
+    console.print("[dim]Ctrl+C to exit[/dim]\n")
+
+    while True:
+        try:
+            user_input = console.input("[bold blue]> [/bold blue]").strip()
+        except (KeyboardInterrupt, EOFError):
+            console.print("\n[dim]Bye![/dim]")
+            break
+
+        if not user_input:
+            continue
+
+        messages.append({"role": "user", "content": user_input})
+
+        try:
+            while True:
+                response = _call_llm(client, messages, registry.get_schemas())
+
+                messages.append({"role": "assistant", "content": response.content})
+
+                tool_uses = [b for b in response.content if b.type == "tool_use"]
+
+                if not tool_uses:
+                    break
+
+                tool_results = []
+                for tool_use in tool_uses:
+                    level, rule = permission_checker.check(
+                        tool_use.name, tool_use.input
+                    )
+
+                    if level == PermissionLevel.DENY:
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": tool_use.id,
+                            "content": f"Denied by rule: {rule.name}",
+                        })
+                        continue
+
+                    if level == PermissionLevel.CONFIRM:
+                        if not _request_permission(tool_use.name, tool_use.input):
+                            tool_results.append({
+                                "type": "tool_result",
+                                "tool_use_id": tool_use.id,
+                                "content": "User denied this action.",
+                            })
+                            continue
+
+                    console.print(f"  [cyan]→ {tool_use.name}[/cyan]({tool_use.input})")
+                    result = registry.execute(tool_use.name, **tool_use.input)
+                    _display_tool_result(result)
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": tool_use.id,
+                        "content": result,
+                    })
+
+                messages.append({"role": "user", "content": tool_results})
+
+        except Exception as e:
+            console.print(f"\n[bold red]Error:[/bold red] {e}")
+            while messages and messages[-1]["role"] != "user":
+                messages.pop()
+            if messages:
+                messages.pop()
+
+
+def main() -> None:
+    run()
+
+
+if __name__ == "__main__":
+    main()

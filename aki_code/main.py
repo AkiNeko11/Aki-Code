@@ -5,9 +5,13 @@ from aki_code.llm.client import get_client
 from aki_code.llm.prompts import SYSTEM_PROMPT
 from aki_code.tools.registry import create_default_registry
 from aki_code.security.permission import PermissionChecker, PermissionLevel
+from aki_code.hooks.manager import HookManager, HookEvent
+from aki_code.hooks.builtin import register_builtin_hooks
 
 console = Console()
 permission_checker = PermissionChecker()
+hook_manager = HookManager()
+register_builtin_hooks(hook_manager)
 
 
 def _request_permission(tool_name: str, tool_input: dict) -> bool:
@@ -63,11 +67,14 @@ def run() -> None:
         if not user_input:
             continue
 
+        hook_manager.fire(HookEvent.ON_USER_INPUT, user_input=user_input)
         messages.append({"role": "user", "content": user_input})
 
         try:
             while True:
+                hook_manager.fire(HookEvent.PRE_LLM_CALL, messages=messages)
                 response = _call_llm(client, messages, registry.get_schemas())
+                hook_manager.fire(HookEvent.POST_LLM_CALL, response=response)
 
                 messages.append({"role": "assistant", "content": response.content})
 
@@ -100,7 +107,20 @@ def run() -> None:
                             continue
 
                     console.print(f"  [cyan]→ {tool_use.name}[/cyan]({tool_use.input})")
+                    hook_manager.fire(
+                        HookEvent.PRE_TOOL_USE,
+                        tool_name=tool_use.name,
+                        tool_input=tool_use.input,
+                        tool_use_id=tool_use.id,
+                    )
                     result = registry.execute(tool_use.name, **tool_use.input)
+                    hook_manager.fire(
+                        HookEvent.POST_TOOL_USE,
+                        tool_name=tool_use.name,
+                        tool_input=tool_use.input,
+                        tool_use_id=tool_use.id,
+                        result=result,
+                    )
                     _display_tool_result(result)
                     tool_results.append({
                         "type": "tool_result",
@@ -111,6 +131,7 @@ def run() -> None:
                 messages.append({"role": "user", "content": tool_results})
 
         except Exception as e:
+            hook_manager.fire(HookEvent.ON_ERROR, error=str(e))
             console.print(f"\n[bold red]Error:[/bold red] {e}")
             while messages and messages[-1]["role"] != "user":
                 messages.pop()

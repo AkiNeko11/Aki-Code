@@ -1,7 +1,7 @@
 from rich.console import Console
 
 from aki_code import config
-from aki_code.llm.client import get_client
+from aki_code.llm.client import get_client, call_with_retry
 from aki_code.llm.prompts import SYSTEM_PROMPT
 from aki_code.tools import create_registry
 from aki_code.security.permission import PermissionManager
@@ -26,22 +26,37 @@ def _display_tool_result(result: str) -> None:
 
 
 def _call_llm(client, messages, tools):
-    """Call LLM with streaming. Prints text as it arrives, returns full response."""
-    has_text = False
-    with client.messages.stream(
-        model=config.MODEL,
-        max_tokens=config.MAX_TOKENS,
-        system=SYSTEM_PROMPT,
-        messages=messages,
-        tools=tools,
-    ) as stream:
-        for text in stream.text_stream:
-            console.print(text, end="", markup=False)
-            has_text = True
-        response = stream.get_final_message()
-    if has_text:
-        console.print()
-    return response
+    """Call LLM with streaming. Prints text as it arrives, returns full response.
+
+    The whole stream is retried on transient errors (rate limit, connection),
+    which almost always surface before any text is emitted.
+    """
+    def _do_stream():
+        has_text = False
+        with client.messages.stream(
+            model=config.MODEL,
+            max_tokens=config.MAX_TOKENS,
+            system=SYSTEM_PROMPT,
+            messages=messages,
+            tools=tools,
+        ) as stream:
+            for text in stream.text_stream:
+                console.print(text, end="", markup=False)
+                has_text = True
+            response = stream.get_final_message()
+        if has_text:
+            console.print()
+        return response
+
+    return call_with_retry(_do_stream)
+
+
+def _read_input() -> str | None:
+    """Read one line of input. Returns None on Ctrl+C / EOF (signals exit)."""
+    try:
+        return console.input("[bold blue]> [/bold blue]").strip()
+    except (KeyboardInterrupt, EOFError):
+        return None
 
 
 def run() -> None:
@@ -61,17 +76,32 @@ def run() -> None:
     console.print("[dim]Ctrl+C to exit[/dim]\n")
 
     while True:
-        try:
-            user_input = console.input("[bold blue]> [/bold blue]").strip()
-        except (KeyboardInterrupt, EOFError):
+        # A dangling user message means the previous turn failed after retries.
+        # Offer to retry it instead of forcing the user to retype.
+        retrying = bool(messages) and messages[-1]["role"] == "user"
+        if retrying:
+            console.print(
+                "[dim]Last request failed. Press Enter to retry, "
+                "or type a new message.[/dim]"
+            )
+
+        user_input = _read_input()
+        if user_input is None:
             console.print("\n[dim]Bye![/dim]")
             break
 
-        if not user_input:
-            continue
+        if retrying:
+            if user_input:
+                messages[-1] = {"role": "user", "content": user_input}
+        else:
+            if not user_input:
+                continue
+            hook_manager.fire(HookEvent.ON_USER_INPUT, user_input=user_input)
+            messages.append({"role": "user", "content": user_input})
 
-        hook_manager.fire(HookEvent.ON_USER_INPUT, user_input=user_input)
-        messages.append({"role": "user", "content": user_input})
+        # Snapshot so a failed turn can be rolled back cleanly, keeping the
+        # user message and all prior history intact (no dangling tool_use).
+        snapshot = len(messages)
 
         try:
             while True:
@@ -133,13 +163,13 @@ def run() -> None:
 
                 messages.append({"role": "user", "content": tool_results})
 
+        except KeyboardInterrupt:
+            del messages[snapshot:]
+            console.print("\n[dim]Interrupted.[/dim]")
         except Exception as e:
+            del messages[snapshot:]
             hook_manager.fire(HookEvent.ON_ERROR, error=str(e))
             console.print(f"\n[bold red]Error:[/bold red] {e}")
-            while messages and messages[-1]["role"] != "user":
-                messages.pop()
-            if messages:
-                messages.pop()
 
     registry.teardown_all()
 

@@ -4,18 +4,19 @@ from aki_code import config
 from aki_code.llm.client import get_client
 from aki_code.llm.prompts import SYSTEM_PROMPT
 from aki_code.tools.registry import create_default_registry
-from aki_code.security.permission import PermissionChecker, PermissionLevel
+from aki_code.security.permission import PermissionManager
 from aki_code.hooks.manager import HookManager, HookEvent
 from aki_code.hooks.builtin import register_builtin_hooks
 
 console = Console()
-permission_checker = PermissionChecker()
+permission_manager = PermissionManager()
 hook_manager = HookManager()
 register_builtin_hooks(hook_manager)
 
 
-def _request_permission(tool_name: str, tool_input: dict) -> bool:
-    console.print(f"  [yellow]⚠ {tool_name}[/yellow]({tool_input})")
+def _request_permission(tool_name: str, tool_input: dict, reason: str) -> bool:
+    console.print(f"  [yellow]⚠ {reason}[/yellow]")
+    console.print(f"  [dim]{tool_name}({tool_input})[/dim]")
     answer = console.input("  [yellow]Allow? (y/n): [/yellow]").strip().lower()
     return answer.startswith("y")
 
@@ -85,20 +86,20 @@ def run() -> None:
 
                 tool_results = []
                 for tool_use in tool_uses:
-                    level, rule = permission_checker.check(
+                    decision, reason = permission_manager.check(
                         tool_use.name, tool_use.input
                     )
 
-                    if level == PermissionLevel.DENY:
+                    if decision == "deny":
                         tool_results.append({
                             "type": "tool_result",
                             "tool_use_id": tool_use.id,
-                            "content": f"Denied by rule: {rule.name}",
+                            "content": f"Denied: {reason}",
                         })
                         continue
 
-                    if level == PermissionLevel.CONFIRM:
-                        if not _request_permission(tool_use.name, tool_use.input):
+                    if decision == "ask":
+                        if not _request_permission(tool_use.name, tool_use.input, reason):
                             tool_results.append({
                                 "type": "tool_result",
                                 "tool_use_id": tool_use.id,

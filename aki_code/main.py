@@ -10,10 +10,9 @@ from aki_code.commands.base import CommandAction, CommandContext
 from aki_code.security.permission import PermissionManager
 from aki_code.hooks.manager import HookManager, HookEvent
 from aki_code.hooks.builtin import register_builtin_hooks
+from aki_code.session import SessionSettings
 
 console = Console()
-hook_manager = HookManager()
-register_builtin_hooks(hook_manager)
 
 
 def _request_permission(tool_name: str, tool_input: dict, reason: str) -> bool:
@@ -74,6 +73,10 @@ def run() -> None:
     permission_manager = PermissionManager()
     messages: list[dict] = []
 
+    settings = SessionSettings()
+    hook_manager = HookManager()
+    register_builtin_hooks(hook_manager, settings)
+
     token_tracker = TokenTracker()
     hook_manager.register(HookEvent.POST_LLM_CALL, token_tracker.on_post_llm_call)
 
@@ -104,6 +107,7 @@ def run() -> None:
                 messages=messages,
                 token_tracker=token_tracker,
                 commands=command_registry,
+                settings=settings,
             )
             if command_registry.dispatch(user_input, ctx).action == CommandAction.EXIT:
                 break

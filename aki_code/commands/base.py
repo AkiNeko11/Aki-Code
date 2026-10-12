@@ -10,6 +10,7 @@ if TYPE_CHECKING:
 
     from aki_code.commands.registry import CommandRegistry
     from aki_code.llm.usage import TokenTracker
+    from aki_code.session import SessionSettings
 
 
 class CommandAction(Enum):
@@ -28,6 +29,7 @@ class CommandContext:
     messages: list[dict]
     token_tracker: "TokenTracker"
     commands: "CommandRegistry"
+    settings: "SessionSettings"
 
 
 class BaseCommand(ABC):

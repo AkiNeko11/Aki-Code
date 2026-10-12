@@ -48,3 +48,29 @@ class UsageCommand(BaseCommand):
         ctx.console.print(f"  [bold]total:[/bold]        {u.total_tokens:>12,}")
         ctx.console.print(f"  [dim]LLM calls: {u.calls}[/dim]")
         return CommandResult()
+
+
+class HooksCommand(BaseCommand):
+    name = "hooks"
+    aliases = ()
+    description = "Toggle hook output: /hooks on|off|status"
+
+    def execute(self, ctx: CommandContext, args: str) -> CommandResult:
+        arg = args.strip().lower()
+        settings = ctx.settings
+
+        if arg in ("on", "enable"):
+            settings.show_hooks = True
+            ctx.console.print("[dim]Hook output: ON[/dim]")
+        elif arg in ("off", "disable"):
+            settings.show_hooks = False
+            ctx.console.print("[dim]Hook output: OFF[/dim]")
+        elif arg in ("status", ""):
+            state = "ON" if settings.show_hooks else "OFF"
+            ctx.console.print(
+                f"[dim]Hook output: {state}. Usage: /hooks on|off|status[/dim]"
+            )
+        else:
+            ctx.console.print("[red]Usage:[/red] /hooks on|off|status")
+        return CommandResult()
+

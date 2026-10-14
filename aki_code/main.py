@@ -70,11 +70,7 @@ def run() -> None:
         raise SystemExit(1)
 
     client = get_client()
-    todo_manager = TodoManager()
-    registry = create_registry(todo_manager)
-    command_registry = create_command_registry()
     permission_manager = PermissionManager()
-    messages: list[dict] = []
 
     settings = SessionSettings()
     hook_manager = HookManager()
@@ -82,6 +78,20 @@ def run() -> None:
 
     token_tracker = TokenTracker()
     hook_manager.register(HookEvent.POST_LLM_CALL, token_tracker.on_post_llm_call)
+
+    # The task tool needs a fully-built registry, permissions and hooks, so it
+    # is wired last — create_registry passes this same registry into TaskTool.
+    todo_manager = TodoManager()
+    registry = create_registry(
+        client=client,
+        permission_manager=permission_manager,
+        hook_manager=hook_manager,
+        todo_manager=todo_manager,
+        ask_permission=_request_permission,
+        console=console,
+    )
+    command_registry = create_command_registry()
+    messages: list[dict] = []
 
     registry.setup_all()
 

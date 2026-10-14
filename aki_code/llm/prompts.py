@@ -65,4 +65,21 @@ def build_system_prompt() -> str:
     return f"{_BASE_PROMPT}\n\n# Environment\n{env}"
 
 
+def build_subagent_prompt() -> str:
+    """System prompt for the nested subagent loop (Lesson 06).
+
+    Deliberately terse: the subagent gets a self-contained task, does the work,
+    and returns a concise final answer that becomes the parent's tool result.
+    """
+    env = _detect_environment()
+    return (
+        f"You are a coding agent working in {os.getcwd()}.\n\n"
+        f"Complete the given task using the available tools, then return a "
+        f"concise final answer. Only your final text is shown to the caller — "
+        f"tool calls and intermediate steps are not.\n\n"
+        f"# Environment\n{env}"
+    )
+
+
 SYSTEM_PROMPT = build_system_prompt()
+SUBAGENT_SYSTEM_PROMPT = build_subagent_prompt()

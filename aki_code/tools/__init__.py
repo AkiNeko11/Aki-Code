@@ -5,10 +5,19 @@ from aki_code.tools.file_write import WriteFileTool
 from aki_code.tools.file_edit import EditFileTool
 from aki_code.tools.glob import GlobTool
 from aki_code.tools.todo_write import TodoWriteTool
+from aki_code.tools.task import TaskTool
 from aki_code.todo.manager import TodoManager
 
 
-def create_registry(todo_manager: TodoManager) -> ToolRegistry:
+def create_registry(
+    *,
+    client,
+    permission_manager,
+    hook_manager,
+    todo_manager: TodoManager,
+    ask_permission,
+    console,
+) -> ToolRegistry:
     reg = ToolRegistry()
     reg.register(BashTool())
     reg.register(ReadFileTool())
@@ -16,4 +25,12 @@ def create_registry(todo_manager: TodoManager) -> ToolRegistry:
     reg.register(EditFileTool())
     reg.register(GlobTool())
     reg.register(TodoWriteTool(todo_manager))
+    reg.register(TaskTool(
+        client=client,
+        registry=reg,
+        permission_manager=permission_manager,
+        hook_manager=hook_manager,
+        ask_permission=ask_permission,
+        console=console,
+    ))
     return reg

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from rich.markup import escape
+
 from aki_code.commands.base import (
     BaseCommand,
     CommandAction,
@@ -106,5 +108,18 @@ class ModeCommand(BaseCommand):
                 "[yellow]File edits inside the workspace are now auto-accepted.[/yellow]"
             )
         return CommandResult()
+
+
+class TodoCommand(BaseCommand):
+    name = "todo"
+    aliases = ("todos",)
+    description = "Show the current task list"
+
+    def execute(self, ctx: CommandContext, args: str) -> CommandResult:
+        rendered = ctx.todo_manager.render()
+        # escape() so the [ ] / [>] / [x] markers aren't parsed as rich markup.
+        ctx.console.print(f"[dim]{escape(rendered)}[/dim]")
+        return CommandResult()
+
 
 

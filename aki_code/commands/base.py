@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from aki_code.llm.usage import TokenTracker
     from aki_code.security.permission import PermissionManager
     from aki_code.session import SessionSettings
+    from aki_code.todo.manager import TodoManager
 
 
 class CommandAction(Enum):
@@ -32,6 +33,7 @@ class CommandContext:
     commands: "CommandRegistry"
     settings: "SessionSettings"
     permission_manager: "PermissionManager"
+    todo_manager: "TodoManager"
 
 
 class BaseCommand(ABC):

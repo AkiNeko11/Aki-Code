@@ -1,4 +1,5 @@
 from rich.console import Console
+from rich.markup import escape
 
 from aki_code import config
 from aki_code.llm.client import get_client, call_with_retry
@@ -11,20 +12,21 @@ from aki_code.security.permission import PermissionManager
 from aki_code.hooks.manager import HookManager, HookEvent
 from aki_code.hooks.builtin import register_builtin_hooks
 from aki_code.session import SessionSettings
+from aki_code.todo.manager import TodoManager
 
 console = Console()
 
 
 def _request_permission(tool_name: str, tool_input: dict, reason: str) -> bool:
     console.print(f"  [yellow]⚠ {reason}[/yellow]")
-    console.print(f"  [dim]{tool_name}({tool_input})[/dim]")
+    console.print(f"  [dim]{escape(f'{tool_name}({tool_input})')}[/dim]")
     answer = console.input("  [yellow]Allow? (y/n): [/yellow]").strip().lower()
     return answer.startswith("y")
 
 
 def _display_tool_result(result: str) -> None:
     preview = result if len(result) <= 500 else result[:500] + "..."
-    console.print(f"  [dim]← {preview}[/dim]")
+    console.print(f"  [dim]← {escape(preview)}[/dim]")
 
 
 def _call_llm(client, messages, tools):
@@ -68,7 +70,8 @@ def run() -> None:
         raise SystemExit(1)
 
     client = get_client()
-    registry = create_registry()
+    todo_manager = TodoManager()
+    registry = create_registry(todo_manager)
     command_registry = create_command_registry()
     permission_manager = PermissionManager()
     messages: list[dict] = []
@@ -84,6 +87,9 @@ def run() -> None:
 
     console.print("[bold green]Aki-Code[/bold green] — coding assistant")
     console.print("[dim]/help for commands, /exit to quit[/dim]\n")
+
+    # Consecutive tool rounds without a todo_write; at 3 we nudge the model.
+    rounds_since_todo = 0
 
     while True:
         # A dangling user message means the previous turn failed after retries.
@@ -109,6 +115,7 @@ def run() -> None:
                 commands=command_registry,
                 settings=settings,
                 permission_manager=permission_manager,
+                todo_manager=todo_manager,
             )
             if command_registry.dispatch(user_input, ctx).action == CommandAction.EXIT:
                 break
@@ -163,7 +170,10 @@ def run() -> None:
                             })
                             continue
 
-                    console.print(f"  [cyan]→ {tool_use.name}[/cyan]({tool_use.input})")
+                    console.print(
+                        f"  [cyan]→ {tool_use.name}[/cyan]"
+                        f"{escape(f'({tool_use.input})')}"
+                    )
                     hook_manager.fire(
                         HookEvent.PRE_TOOL_USE,
                         tool_name=tool_use.name,
@@ -184,6 +194,15 @@ def run() -> None:
                         "tool_use_id": tool_use.id,
                         "content": result,
                     })
+
+                used_todo = any(t.name == "todo_write" for t in tool_uses)
+                rounds_since_todo = 0 if used_todo else rounds_since_todo + 1
+                if rounds_since_todo >= 3:
+                    tool_results.append({
+                        "type": "text",
+                        "text": "<reminder>Update your todos.</reminder>",
+                    })
+                    rounds_since_todo = 0
 
                 messages.append({"role": "user", "content": tool_results})
 

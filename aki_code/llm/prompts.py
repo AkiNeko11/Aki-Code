@@ -4,27 +4,14 @@ import os
 import platform
 import shutil
 
-
-def _detect_shell() -> str:
-    if platform.system() == "Windows":
-        parent = os.environ.get("PSModulePath")
-        if parent:
-            return "PowerShell"
-        comspec = os.environ.get("COMSPEC", "")
-        if "cmd" in comspec.lower():
-            return "cmd.exe"
-        return "PowerShell"
-    shell = os.environ.get("SHELL", "")
-    if shell:
-        return os.path.basename(shell)
-    return "sh"
+from aki_code.shell import get_execution_shell
 
 
 def _detect_environment() -> str:
     system = platform.system()
     release = platform.release()
     machine = platform.machine()
-    shell = _detect_shell()
+    shell = get_execution_shell()
     cwd = os.getcwd()
     path_sep = os.sep
 

@@ -20,6 +20,9 @@ class BashTool(BaseTool):
     }
 
     def execute(self, *, command: str) -> str:
+        # shell=True resolves to cmd.exe on Windows and /bin/sh on POSIX.
+        # This must match aki_code.shell.get_execution_shell(), which is what
+        # the system prompt reports to the model.
         try:
             result = subprocess.run(
                 command,

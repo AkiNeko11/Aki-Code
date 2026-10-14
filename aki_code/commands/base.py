@@ -10,6 +10,7 @@ if TYPE_CHECKING:
 
     from aki_code.commands.registry import CommandRegistry
     from aki_code.llm.usage import TokenTracker
+    from aki_code.security.permission import PermissionManager
     from aki_code.session import SessionSettings
 
 
@@ -30,6 +31,7 @@ class CommandContext:
     token_tracker: "TokenTracker"
     commands: "CommandRegistry"
     settings: "SessionSettings"
+    permission_manager: "PermissionManager"
 
 
 class BaseCommand(ABC):

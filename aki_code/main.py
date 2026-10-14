@@ -108,6 +108,7 @@ def run() -> None:
                 token_tracker=token_tracker,
                 commands=command_registry,
                 settings=settings,
+                permission_manager=permission_manager,
             )
             if command_registry.dispatch(user_input, ctx).action == CommandAction.EXIT:
                 break

@@ -2,7 +2,20 @@ from __future__ import annotations
 
 import os
 import re
+from enum import Enum
 from pathlib import Path
+
+
+class PermissionMode(Enum):
+    """How aggressively the agent may act without asking.
+
+    DEFAULT: file writes/edits require confirmation.
+    ACCEPT_EDITS: file writes/edits inside allowed_dirs are auto-accepted;
+                  bash approval rules and the deny-list still apply.
+    """
+
+    DEFAULT = "default"
+    ACCEPT_EDITS = "accept-edits"
 
 
 # ── Level 1: Deny List ───────────────────────────────────────
@@ -60,6 +73,7 @@ class PermissionManager:
         self,
         allowed_dirs: list[str] | None = None,
         base_dir: str | Path | None = None,
+        mode: PermissionMode = PermissionMode.DEFAULT,
     ):
         if allowed_dirs:
             self.allowed_dirs = [Path(d).expanduser().resolve() for d in allowed_dirs]
@@ -70,6 +84,8 @@ class PermissionManager:
             self.base_dir = Path(base_dir).expanduser().resolve()
         else:
             self.base_dir = Path(os.getcwd()).resolve()
+
+        self.mode = mode
 
     # ── Path helpers ──────────────────────────────────────────
 
@@ -157,8 +173,10 @@ class PermissionManager:
                 if pattern.search(command):
                     return "ask", f"Command matches approval rule: {pattern.pattern}"
 
-        # Layer 2, Level 3: File-write tools always need confirmation.
+        # Layer 2, Level 3: File-write tools.
         if tool_name in ("write_file", "edit_file"):
+            if self.mode == PermissionMode.ACCEPT_EDITS:
+                return "allow", "Auto-accepted edit (accept-edits mode)"
             return "ask", f"File modification: {args.get('path', 'unknown')}"
 
         return "allow", "Passed all checks"

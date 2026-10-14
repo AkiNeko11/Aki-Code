@@ -6,6 +6,7 @@ from aki_code.commands.base import (
     CommandContext,
     CommandResult,
 )
+from aki_code.security.permission import PermissionMode
 
 
 class HelpCommand(BaseCommand):
@@ -73,4 +74,37 @@ class HooksCommand(BaseCommand):
         else:
             ctx.console.print("[red]Usage:[/red] /hooks on|off|status")
         return CommandResult()
+
+
+class ModeCommand(BaseCommand):
+    name = "mode"
+    aliases = ("permission", "permissions")
+    description = "View/set permission mode: /mode (default|accept-edits)"
+
+    def execute(self, ctx: CommandContext, args: str) -> CommandResult:
+        pm = ctx.permission_manager
+        arg = args.strip().lower()
+
+        if not arg:
+            ctx.console.print(
+                f"[dim]Permission mode: {pm.mode.value}. "
+                "Usage: /mode (default|accept-edits)[/dim]"
+            )
+            return CommandResult()
+
+        try:
+            new_mode = PermissionMode(arg)
+        except ValueError:
+            valid = " | ".join(m.value for m in PermissionMode)
+            ctx.console.print(f"[red]Unknown mode:[/red] {arg}. Valid: {valid}")
+            return CommandResult()
+
+        pm.mode = new_mode
+        ctx.console.print(f"[dim]Permission mode: {new_mode.value}[/dim]")
+        if new_mode == PermissionMode.ACCEPT_EDITS:
+            ctx.console.print(
+                "[yellow]File edits inside the workspace are now auto-accepted.[/yellow]"
+            )
+        return CommandResult()
+
 

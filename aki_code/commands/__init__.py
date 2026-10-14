@@ -3,6 +3,7 @@ from aki_code.commands.builtin import (
     ExitCommand,
     HelpCommand,
     HooksCommand,
+    ModeCommand,
     UsageCommand,
 )
 
@@ -14,5 +15,6 @@ def create_command_registry() -> CommandRegistry:
     reg.register(HelpCommand())
     reg.register(UsageCommand())
     reg.register(HooksCommand())
+    reg.register(ModeCommand())
     reg.register(ExitCommand())
     return reg

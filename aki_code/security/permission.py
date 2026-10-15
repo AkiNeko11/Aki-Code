@@ -65,7 +65,7 @@ ASK_RULES_RAW = [
 ASK_RULES = [re.compile(p, re.IGNORECASE) for p in ASK_RULES_RAW]
 
 # Tools that are read-only / side-effect-free and always auto-allowed.
-SAFE_TOOLS_AUTO = {"read_file", "glob", "todo_write"}
+SAFE_TOOLS_AUTO = {"read_file", "glob", "todo_write", "load_skill"}
 
 
 class PermissionManager:

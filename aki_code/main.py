@@ -3,7 +3,7 @@ from rich.markup import escape
 
 from aki_code import config
 from aki_code.llm.client import get_client, call_with_retry
-from aki_code.llm.prompts import SYSTEM_PROMPT
+from aki_code.llm.prompts import build_system_prompt
 from aki_code.llm.usage import TokenTracker
 from aki_code.tools import create_registry
 from aki_code.commands import create_command_registry
@@ -12,6 +12,7 @@ from aki_code.security.permission import PermissionManager
 from aki_code.hooks.manager import HookManager, HookEvent
 from aki_code.hooks.builtin import register_builtin_hooks
 from aki_code.session import SessionSettings
+from aki_code.skills.loader import SkillLoader
 from aki_code.todo.manager import TodoManager
 
 console = Console()
@@ -29,7 +30,7 @@ def _display_tool_result(result: str) -> None:
     console.print(f"  [dim]← {escape(preview)}[/dim]")
 
 
-def _call_llm(client, messages, tools):
+def _call_llm(client, messages, tools, system):
     """Call LLM with streaming. Prints text as it arrives, returns full response.
 
     The whole stream is retried on transient errors (rate limit, connection),
@@ -40,7 +41,7 @@ def _call_llm(client, messages, tools):
         with client.messages.stream(
             model=config.MODEL,
             max_tokens=config.MAX_TOKENS,
-            system=SYSTEM_PROMPT,
+            system=system,
             messages=messages,
             tools=tools,
         ) as stream:
@@ -82,11 +83,15 @@ def run() -> None:
     # The task tool needs a fully-built registry, permissions and hooks, so it
     # is wired last — create_registry passes this same registry into TaskTool.
     todo_manager = TodoManager()
+    skill_loader = SkillLoader(config.SKILLS_DIR)
+    skill_loader.scan()
+    system_prompt = build_system_prompt(skill_loader.catalog())
     registry = create_registry(
         client=client,
         permission_manager=permission_manager,
         hook_manager=hook_manager,
         todo_manager=todo_manager,
+        skill_loader=skill_loader,
         ask_permission=_request_permission,
         console=console,
     )
@@ -126,6 +131,7 @@ def run() -> None:
                 settings=settings,
                 permission_manager=permission_manager,
                 todo_manager=todo_manager,
+                skill_loader=skill_loader,
             )
             if command_registry.dispatch(user_input, ctx).action == CommandAction.EXIT:
                 break
@@ -147,7 +153,9 @@ def run() -> None:
         try:
             while True:
                 hook_manager.fire(HookEvent.PRE_LLM_CALL, messages=messages)
-                response = _call_llm(client, messages, registry.get_schemas())
+                response = _call_llm(
+                    client, messages, registry.get_schemas(), system_prompt
+                )
                 hook_manager.fire(HookEvent.POST_LLM_CALL, response=response)
 
                 messages.append({"role": "assistant", "content": response.content})

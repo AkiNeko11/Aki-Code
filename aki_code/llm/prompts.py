@@ -60,9 +60,16 @@ You have access to tools for:
 Always use tools when you need to interact with the codebase. Don't guess file contents - read them."""
 
 
-def build_system_prompt() -> str:
+def build_system_prompt(skill_catalog: str = "") -> str:
     env = _detect_environment()
-    return f"{_BASE_PROMPT}\n\n# Environment\n{env}"
+    prompt = f"{_BASE_PROMPT}\n\n# Environment\n{env}"
+    if skill_catalog:
+        prompt += (
+            f"\n\n# Skills available\n{skill_catalog}\n\n"
+            "Use the load_skill tool to read a skill's full instructions when "
+            "it applies to the current task."
+        )
+    return prompt
 
 
 def build_subagent_prompt() -> str:
@@ -81,5 +88,4 @@ def build_subagent_prompt() -> str:
     )
 
 
-SYSTEM_PROMPT = build_system_prompt()
 SUBAGENT_SYSTEM_PROMPT = build_subagent_prompt()

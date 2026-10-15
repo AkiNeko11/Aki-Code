@@ -4,11 +4,12 @@ from aki_code.commands.builtin import (
     HelpCommand,
     HooksCommand,
     ModeCommand,
+    SkillCommand,
     TodoCommand,
     UsageCommand,
 )
 
-# Future commands register here: /compact (Lesson 08), /skill (Lesson 07).
+# Future commands register here: /compact (Lesson 08).
 
 
 def create_command_registry() -> CommandRegistry:
@@ -18,5 +19,6 @@ def create_command_registry() -> CommandRegistry:
     reg.register(HooksCommand())
     reg.register(ModeCommand())
     reg.register(TodoCommand())
+    reg.register(SkillCommand())
     reg.register(ExitCommand())
     return reg

@@ -122,4 +122,22 @@ class TodoCommand(BaseCommand):
         return CommandResult()
 
 
+class SkillCommand(BaseCommand):
+    name = "skill"
+    aliases = ("skills",)
+    description = "List loaded skills"
+
+    def execute(self, ctx: CommandContext, args: str) -> CommandResult:
+        skills = ctx.skill_loader.skills
+        if not skills:
+            ctx.console.print("[dim](no skills loaded)[/dim]")
+            return CommandResult()
+        ctx.console.print("[bold]Skills:[/bold]")
+        for s in skills.values():
+            ctx.console.print(
+                f"  [cyan]{escape(s.name)}[/cyan] [dim]{escape(s.description)}[/dim]"
+            )
+        return CommandResult()
+
+
 

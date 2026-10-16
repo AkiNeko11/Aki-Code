@@ -140,6 +140,26 @@ class SkillCommand(BaseCommand):
         return CommandResult()
 
 
+class MemoryCommand(BaseCommand):
+    name = "memory"
+    aliases = ("mem",)
+    description = "List stored memories"
+
+    def execute(self, ctx: CommandContext, args: str) -> CommandResult:
+        ctx.memory_store.scan()
+        memories = ctx.memory_store.memories
+        if not memories:
+            ctx.console.print("[dim](no memories stored)[/dim]")
+            return CommandResult()
+        ctx.console.print("[bold]Memories:[/bold]")
+        for i, m in enumerate(memories):
+            ctx.console.print(
+                f"  [cyan]{i}[/cyan] [magenta][{escape(m.type)}][/magenta] "
+                f"[bold]{escape(m.name)}[/bold] [dim]{escape(m.description)}[/dim]"
+            )
+        return CommandResult()
+
+
 class CompactCommand(BaseCommand):
     name = "compact"
     aliases = ()

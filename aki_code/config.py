@@ -28,3 +28,12 @@ MAX_REACTIVE_RETRIES: int = int(os.getenv("MAX_REACTIVE_RETRIES", "1"))
 SUMMARY_MAX_TOKENS: int = int(os.getenv("SUMMARY_MAX_TOKENS", "1024"))
 TRANSCRIPTS_DIR: str = os.getenv("TRANSCRIPTS_DIR", ".transcripts")
 TOOL_OUTPUTS_DIR: str = os.getenv("TOOL_OUTPUTS_DIR", ".task_outputs/tool-results")
+
+# ── Memory system (Lesson 09) ────────────────────────────────────
+# Durable, cross-session knowledge: one Markdown file per memory under
+# MEMORY_DIR, with MEMORY.md as a rebuilt index. Recall is selective.
+MEMORY_DIR: str = os.getenv("MEMORY_DIR", ".memory")
+MEMORY_INDEX_NAME: str = os.getenv("MEMORY_INDEX_NAME", "MEMORY.md")
+MEMORY_MAX_RECALL: int = int(os.getenv("MEMORY_MAX_RECALL", "5"))
+MEMORY_RECALL_CHAR_CAP: int = int(os.getenv("MEMORY_RECALL_CHAR_CAP", "8000"))
+MEMORY_CONSOLIDATE_THRESHOLD: int = int(os.getenv("MEMORY_CONSOLIDATE_THRESHOLD", "10"))

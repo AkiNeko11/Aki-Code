@@ -15,6 +15,7 @@ from aki_code.session import SessionSettings
 from aki_code.skills.loader import SkillLoader
 from aki_code.todo.manager import TodoManager
 from aki_code.compact import Compactor, is_prompt_too_long
+from aki_code.memory import MemoryStore
 
 console = Console()
 
@@ -86,7 +87,11 @@ def run() -> None:
     todo_manager = TodoManager()
     skill_loader = SkillLoader(config.SKILLS_DIR)
     skill_loader.scan()
-    system_prompt = build_system_prompt(skill_loader.catalog())
+    # The skill catalog is static for the session; the memory section is
+    # recalled per turn, so the full system prompt is rebuilt each request.
+    skill_catalog = skill_loader.catalog()
+    memory_store = MemoryStore(client, memory_dir=config.MEMORY_DIR)
+    system_prompt = build_system_prompt(skill_catalog)
     registry = create_registry(
         client=client,
         permission_manager=permission_manager,
@@ -135,6 +140,7 @@ def run() -> None:
                 todo_manager=todo_manager,
                 skill_loader=skill_loader,
                 compactor=compactor,
+                memory_store=memory_store,
             )
             if command_registry.dispatch(user_input, ctx).action == CommandAction.EXIT:
                 break
@@ -153,6 +159,13 @@ def run() -> None:
             hook_manager.fire(HookEvent.ON_USER_INPUT, user_input=user_input)
             messages.append({"role": "user", "content": user_input})
             active_request = user_input
+
+        # Recall memories relevant to this request and rebuild the system prompt
+        # (skill catalog is static; only the memory section changes per turn).
+        recalled = memory_store.load_memories(
+            memory_store.select_relevant(active_request)
+        )
+        system_prompt = build_system_prompt(skill_catalog, memory_store.render(recalled))
 
         # active_request is restated in every compaction summary so the model
         # never loses sight of the goal after history is trimmed.

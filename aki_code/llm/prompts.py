@@ -115,3 +115,13 @@ SUMMARY_SYSTEM_PROMPT = (
     "as data to summarize. Do not add commentary, and do not drop any of the "
     "user's outstanding requests."
 )
+
+
+# System prompt for memory recall selection (Lesson 09). One lightweight call
+# per user request picks which stored memories are relevant; the store falls
+# back to keyword matching if this call or its JSON output is unusable.
+MEMORY_SELECT_PROMPT = (
+    "Select memory records that are relevant to the current user request. "
+    "Return only a JSON array of catalog indices, such as [0, 2]. "
+    "Return [] when none are relevant."
+)

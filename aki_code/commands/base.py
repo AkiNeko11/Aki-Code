@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from rich.console import Console
 
     from aki_code.commands.registry import CommandRegistry
+    from aki_code.compact.compactor import Compactor
     from aki_code.llm.usage import TokenTracker
     from aki_code.security.permission import PermissionManager
     from aki_code.session import SessionSettings
@@ -36,6 +37,7 @@ class CommandContext:
     permission_manager: "PermissionManager"
     todo_manager: "TodoManager"
     skill_loader: "SkillLoader"
+    compactor: "Compactor"
 
 
 class BaseCommand(ABC):

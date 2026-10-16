@@ -140,4 +140,25 @@ class SkillCommand(BaseCommand):
         return CommandResult()
 
 
+class CompactCommand(BaseCommand):
+    name = "compact"
+    aliases = ()
+    description = "Summarize earlier conversation now: /compact [focus]"
+
+    def execute(self, ctx: CommandContext, args: str) -> CommandResult:
+        if not ctx.messages:
+            ctx.console.print("[dim](nothing to compact)[/dim]")
+            return CommandResult()
+        before = len(ctx.messages)
+        # No pending user request here: slash commands never enter messages.
+        ctx.messages[:] = ctx.compactor.compact_history(
+            ctx.messages, active_request=None, focus=args.strip() or None
+        )
+        ctx.console.print(
+            f"[dim]Compacted {before} messages → 1 summary "
+            f"({ctx.compactor.estimate_chars(ctx.messages)} chars).[/dim]"
+        )
+        return CommandResult()
+
+
 

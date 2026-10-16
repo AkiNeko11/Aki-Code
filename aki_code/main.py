@@ -14,6 +14,7 @@ from aki_code.hooks.builtin import register_builtin_hooks
 from aki_code.session import SessionSettings
 from aki_code.skills.loader import SkillLoader
 from aki_code.todo.manager import TodoManager
+from aki_code.compact import Compactor, is_prompt_too_long
 
 console = Console()
 
@@ -96,6 +97,7 @@ def run() -> None:
         console=console,
     )
     command_registry = create_command_registry()
+    compactor = Compactor(client, todo_manager=todo_manager, console=console)
     messages: list[dict] = []
 
     registry.setup_all()
@@ -132,6 +134,7 @@ def run() -> None:
                 permission_manager=permission_manager,
                 todo_manager=todo_manager,
                 skill_loader=skill_loader,
+                compactor=compactor,
             )
             if command_registry.dispatch(user_input, ctx).action == CommandAction.EXIT:
                 break
@@ -140,22 +143,37 @@ def run() -> None:
         if retrying:
             if user_input:
                 messages[-1] = {"role": "user", "content": user_input}
+                active_request = user_input
+            else:
+                prev = messages[-1].get("content")
+                active_request = prev if isinstance(prev, str) else ""
         else:
             if not user_input:
                 continue
             hook_manager.fire(HookEvent.ON_USER_INPUT, user_input=user_input)
             messages.append({"role": "user", "content": user_input})
+            active_request = user_input
 
-        # Snapshot so a failed turn can be rolled back cleanly, keeping the
-        # user message and all prior history intact (no dangling tool_use).
-        snapshot = len(messages)
+        # active_request is restated in every compaction summary so the model
+        # never loses sight of the goal after history is trimmed.
+        # reactive_retries bounds consecutive reactive compactions this turn, so
+        # a context that cannot be shrunk enough errors out instead of looping.
+        reactive_retries = 0
 
-        try:
-            while True:
+        while True:
+            # Keep the conversation within budget before every model call.
+            messages[:] = compactor.prepare(messages, active_request)
+            # Snapshot the clean pre-call state so a mid-round failure (e.g. a
+            # tool raising after the assistant turn was appended) rolls back
+            # without leaving a dangling tool_use.
+            snapshot = len(messages)
+
+            try:
                 hook_manager.fire(HookEvent.PRE_LLM_CALL, messages=messages)
                 response = _call_llm(
                     client, messages, registry.get_schemas(), system_prompt
                 )
+                reactive_retries = 0
                 hook_manager.fire(HookEvent.POST_LLM_CALL, response=response)
 
                 messages.append({"role": "assistant", "content": response.content})
@@ -166,6 +184,7 @@ def run() -> None:
                     break
 
                 tool_results = []
+                compact_requested = False
                 for tool_use in tool_uses:
                     decision, reason = permission_manager.check(
                         tool_use.name, tool_use.input
@@ -207,6 +226,10 @@ def run() -> None:
                         result=result,
                     )
                     _display_tool_result(result)
+                    # The compact tool only signals intent; the real compaction
+                    # runs once the whole batch is appended, below.
+                    if tool_use.name == "compact":
+                        compact_requested = True
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": tool_use.id,
@@ -224,13 +247,26 @@ def run() -> None:
 
                 messages.append({"role": "user", "content": tool_results})
 
-        except KeyboardInterrupt:
-            del messages[snapshot:]
-            console.print("\n[dim]Interrupted.[/dim]")
-        except Exception as e:
-            del messages[snapshot:]
-            hook_manager.fire(HookEvent.ON_ERROR, error=str(e))
-            console.print(f"\n[bold red]Error:[/bold red] {e}")
+                # Batch is closed: collapse history into a summary now.
+                if compact_requested:
+                    messages[:] = compactor.compact_history(messages, active_request)
+
+            except KeyboardInterrupt:
+                del messages[snapshot:]
+                console.print("\n[dim]Interrupted.[/dim]")
+                break
+            except Exception as e:
+                if (
+                    is_prompt_too_long(e)
+                    and reactive_retries < compactor.max_reactive_retries
+                ):
+                    messages[:] = compactor.reactive_compact(messages, active_request)
+                    reactive_retries += 1
+                    continue
+                del messages[snapshot:]
+                hook_manager.fire(HookEvent.ON_ERROR, error=str(e))
+                console.print(f"\n[bold red]Error:[/bold red] {e}")
+                break
 
     registry.teardown_all()
 

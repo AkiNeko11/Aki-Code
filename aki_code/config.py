@@ -18,6 +18,12 @@ LARGE_RESULT_PREVIEW_CHARS: int = int(os.getenv("LARGE_RESULT_PREVIEW_CHARS", "2
 MAX_MESSAGES: int = int(os.getenv("MAX_MESSAGES", "50"))
 SNIP_HEAD_MESSAGES: int = int(os.getenv("SNIP_HEAD_MESSAGES", "3"))
 KEEP_RECENT_MESSAGES: int = int(os.getenv("KEEP_RECENT_MESSAGES", "5"))
+# Step 3 (micro_compact / fit_tool_results): shrink already-consumed results
+# toward COMPACT_TARGET_RATIO of the limit before resorting to a summary.
+COMPACT_TARGET_RATIO: float = float(os.getenv("COMPACT_TARGET_RATIO", "0.8"))
+KEEP_RECENT_RESULTS: int = int(os.getenv("KEEP_RECENT_RESULTS", "3"))
+MICRO_COMPACT_MIN_CHARS: int = int(os.getenv("MICRO_COMPACT_MIN_CHARS", "120"))
+FIT_RESULT_PREVIEW_CHARS: int = int(os.getenv("FIT_RESULT_PREVIEW_CHARS", "1000"))
 MAX_REACTIVE_RETRIES: int = int(os.getenv("MAX_REACTIVE_RETRIES", "1"))
 SUMMARY_MAX_TOKENS: int = int(os.getenv("SUMMARY_MAX_TOKENS", "1024"))
 TRANSCRIPTS_DIR: str = os.getenv("TRANSCRIPTS_DIR", ".transcripts")

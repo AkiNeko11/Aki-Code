@@ -16,6 +16,10 @@ from aki_code.llm.prompts import SUMMARY_SYSTEM_PROMPT
 # filename so a crafted id can never escape the tool-outputs directory.
 _UNSAFE_ID = re.compile(r"[^A-Za-z0-9_-]")
 
+# Matches the path inside any offload placeholder ("... saved at <path>]"),
+# so an already-persisted result is not written to disk a second time.
+_SAVED_AT = re.compile(r"saved at (.+?)\]")
+
 
 def _json_default(obj):
     """Serialize Anthropic SDK content blocks (pydantic) and anything else.
@@ -58,6 +62,10 @@ class Compactor:
         max_messages: int = config.MAX_MESSAGES,
         snip_head: int = config.SNIP_HEAD_MESSAGES,
         keep_recent_messages: int = config.KEEP_RECENT_MESSAGES,
+        compact_target_ratio: float = config.COMPACT_TARGET_RATIO,
+        keep_recent_results: int = config.KEEP_RECENT_RESULTS,
+        micro_compact_min_chars: int = config.MICRO_COMPACT_MIN_CHARS,
+        fit_result_preview_chars: int = config.FIT_RESULT_PREVIEW_CHARS,
         max_reactive_retries: int = config.MAX_REACTIVE_RETRIES,
         summary_max_tokens: int = config.SUMMARY_MAX_TOKENS,
         transcripts_dir: str | Path = config.TRANSCRIPTS_DIR,
@@ -73,6 +81,10 @@ class Compactor:
         self.max_messages = max_messages
         self.snip_head = snip_head
         self.keep_recent_messages = keep_recent_messages
+        self.compact_target_ratio = compact_target_ratio
+        self.keep_recent_results = keep_recent_results
+        self.micro_compact_min_chars = micro_compact_min_chars
+        self.fit_result_preview_chars = fit_result_preview_chars
         self.max_reactive_retries = max_reactive_retries
         self.summary_max_tokens = summary_max_tokens
         self.transcripts_dir = Path(transcripts_dir)
@@ -81,11 +93,22 @@ class Compactor:
     # ── Pipeline ────────────────────────────────────────────────
 
     def prepare(self, messages: list, active_request: str | None = None) -> list:
-        """Run the compaction pipeline; return the (possibly rewritten) list."""
+        """Run the compaction pipeline; return the (possibly rewritten) list.
+
+        Steps 1-2 run every round and are free; step 3 (micro/fit) runs only
+        once the context is over budget and still costs no API call; step 4
+        (model summary) is the last resort. Each cheaper step is retried
+        against the limit before falling through to the next.
+        """
         messages = self.tool_result_budget(messages)
         messages = self.snip_compact(messages)
         if self.estimate_chars(messages) > self.context_char_limit:
-            messages = self.compact_history(messages, active_request)
+            target = int(self.context_char_limit * self.compact_target_ratio)
+            messages = self.micro_compact(messages, target)
+            if self.estimate_chars(messages) > self.context_char_limit:
+                messages = self.fit_tool_results(messages, target)
+            if self.estimate_chars(messages) > self.context_char_limit:
+                messages = self.compact_history(messages, active_request)
         return messages
 
     def estimate_chars(self, messages: list) -> int:
@@ -127,14 +150,28 @@ class Compactor:
         return messages
 
     def persist_large_output(self, tool_use_id: str, content: str) -> str:
-        path = self._tool_output_path(tool_use_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
+        path = self.save_output(tool_use_id, content)
         preview = content[: self.large_result_preview]
         return (
             f"[Large tool result saved at {path}]\n"
             f"Preview (first {self.large_result_preview} chars):\n{preview}"
         )
+
+    def save_output(self, tool_use_id: str, content: str) -> str:
+        """Write content to the tool-outputs dir; return the path as a string."""
+        path = self._tool_output_path(tool_use_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        return str(path)
+
+    def persisted_output_path(self, content: str) -> str | None:
+        """If content is already an offload placeholder, return its path.
+
+        Lets step 3 reuse the file written by step 1 (or a previous round)
+        instead of persisting the same result a second time.
+        """
+        match = _SAVED_AT.search(content)
+        return match.group(1) if match else None
 
     def _tool_output_path(self, tool_use_id: str) -> Path:
         safe = _UNSAFE_ID.sub("_", str(tool_use_id)) or "unknown"
@@ -166,6 +203,99 @@ class Compactor:
             "content": f"[{archived} messages archived at {transcript}]",
         }
         return [*messages[:head_end], marker, *messages[tail_start:]]
+
+    # ── Step 3: shrink consumed results toward the target (no API call) ──
+
+    def micro_compact(self, messages: list, target_chars: int) -> list:
+        """Shorten already-consumed tool results, oldest first, until target.
+
+        The newest batch is left verbatim (the model has not read it yet), and
+        the most recent KEEP_RECENT_RESULTS consumed results are kept too. Each
+        shortened result is written to disk first, so its placeholder carries a
+        recoverable path.
+        """
+        results = self._tool_result_entries(messages)
+        unseen = self.unseen_tool_result_positions(messages)
+        consumed = [e for e in results if e[:2] not in unseen]
+        if self.keep_recent_results > 0:
+            consumed = consumed[: -self.keep_recent_results]
+        for _, _, block in consumed:
+            if self.estimate_chars(messages) <= target_chars:
+                break
+            content = str(block.get("content", ""))
+            if len(content) <= self.micro_compact_min_chars:
+                continue
+            saved_path = self.persisted_output_path(content)
+            if not saved_path:
+                saved_path = self.save_output(
+                    block.get("tool_use_id", "unknown"), content
+                )
+            block["content"] = f"[Earlier tool result saved at {saved_path}]"
+        return messages
+
+    def fit_tool_results(self, messages: list, target_chars: int) -> list:
+        """Shrink the newest (unseen) batch when it alone busts the budget.
+
+        micro_compact deliberately spares the freshest results; if they are
+        still too large, offload the biggest ones with a short preview so the
+        model sees usable content instead of the whole round collapsing into a
+        full-history summary.
+        """
+        unseen = self.unseen_tool_result_positions(messages)
+        entries = [e for e in self._tool_result_entries(messages) if e[:2] in unseen]
+
+        def size(entry) -> int:
+            return len(str(entry[2].get("content", "")))
+
+        for _, _, block in sorted(entries, key=size, reverse=True):
+            if self.estimate_chars(messages) <= target_chars:
+                break
+            content = str(block.get("content", ""))
+            if len(content) <= self.fit_result_preview_chars:
+                continue
+            saved_path = self.persisted_output_path(content)
+            if not saved_path:
+                saved_path = self.save_output(
+                    block.get("tool_use_id", "unknown"), content
+                )
+            preview = content[: self.fit_result_preview_chars]
+            block["content"] = (
+                f"[Tool result saved at {saved_path}]\n"
+                f"Preview (first {self.fit_result_preview_chars} chars):\n{preview}"
+            )
+        return messages
+
+    def _tool_result_entries(self, messages: list) -> list:
+        """(msg_index, block_index, block) for every tool_result, in order."""
+        entries = []
+        for mi, message in enumerate(messages):
+            content = message.get("content") if isinstance(message, dict) else None
+            if not isinstance(content, list):
+                continue
+            for bi, block in enumerate(content):
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    entries.append((mi, bi, block))
+        return entries
+
+    def unseen_tool_result_positions(self, messages: list) -> set:
+        """Positions of the trailing tool_result batch the model has not read.
+
+        prepare() runs before each model call, so when the last message is a
+        tool_result batch those results are still unseen and should survive
+        micro_compact verbatim.
+        """
+        if not messages:
+            return set()
+        last = messages[-1]
+        content = last.get("content") if isinstance(last, dict) else None
+        if not isinstance(content, list):
+            return set()
+        last_idx = len(messages) - 1
+        return {
+            (last_idx, bi)
+            for bi, block in enumerate(content)
+            if isinstance(block, dict) and block.get("type") == "tool_result"
+        }
 
     # ── Step 4: model-generated facts-only summary (last resort) ──
 

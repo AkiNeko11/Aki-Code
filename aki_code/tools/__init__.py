@@ -10,6 +10,9 @@ from aki_code.tools.compact import CompactTool
 from aki_code.tools.task_create import CreateTaskTool
 from aki_code.tools.task_get import GetTaskTool
 from aki_code.tools.task_list import ListTasksTool
+from aki_code.tools.task_update import UpdateTaskTool
+from aki_code.tools.task_claim import ClaimTaskTool
+from aki_code.tools.task_complete import CompleteTaskTool
 from aki_code.tools.task import TaskTool
 from aki_code.todo.manager import TodoManager
 from aki_code.skills.loader import SkillLoader
@@ -39,6 +42,9 @@ def create_registry(
     reg.register(CreateTaskTool(task_store))
     reg.register(GetTaskTool(task_store))
     reg.register(ListTasksTool(task_store))
+    reg.register(UpdateTaskTool(task_store))
+    reg.register(ClaimTaskTool(task_store))
+    reg.register(CompleteTaskTool(task_store))
     reg.register(TaskTool(
         client=client,
         registry=reg,

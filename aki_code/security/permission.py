@@ -74,6 +74,9 @@ SAFE_TOOLS_AUTO = {
     "create_task",
     "get_task",
     "list_tasks",
+    "update_task",
+    "claim_task",
+    "complete_task",
 }
 
 

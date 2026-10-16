@@ -7,7 +7,7 @@ import secrets
 from pathlib import Path
 
 from aki_code import config
-from aki_code.tasks.model import Task
+from aki_code.tasks.model import COMPLETED, IN_PROGRESS, PENDING, Task
 
 # ids are "task_" + 8 hex chars; validating the shape before it is ever used as
 # a filename means a crafted id cannot escape the tasks directory.
@@ -97,3 +97,125 @@ class TaskStore:
             return self._task_path(task_id).is_file()
         except KeyError:
             return False
+
+    # ── Dependencies ────────────────────────────────────────────
+
+    def update_dependencies(self, task_id: str, addBlockedBy) -> Task:
+        """Add blockedBy edges, validating the whole change before saving.
+
+        Rules (course): the target and every dependency must exist; the target
+        must still be pending and unclaimed; no self-dependency or cycle. Adding
+        an edge that already exists is a safe no-op.
+        """
+        if isinstance(addBlockedBy, str):
+            addBlockedBy = [addBlockedBy]
+        deps = [str(x) for x in (addBlockedBy or [])]
+
+        task = self.load(task_id)  # target must exist
+        for dep_id in deps:
+            if not self.exists(dep_id):
+                raise KeyError(f"unknown dependency '{dep_id}'")
+        if task.status != PENDING:
+            raise ValueError(
+                f"task {task_id} is {task.status}; dependencies can only be "
+                f"added while pending"
+            )
+        if task.owner is not None:
+            raise ValueError(f"task {task_id} is already claimed by {task.owner}")
+        if task_id in deps:
+            raise ValueError(f"task {task_id} cannot depend on itself")
+        if self._creates_cycle(task_id, deps):
+            raise ValueError(
+                f"adding {deps} to {task_id} would create a dependency cycle"
+            )
+
+        merged = list(task.blockedBy)
+        for dep_id in deps:
+            if dep_id not in merged:
+                merged.append(dep_id)
+        task.blockedBy = merged
+        self.save(task)
+        return task
+
+    def _creates_cycle(self, task_id: str, new_deps: list[str]) -> bool:
+        """True if making `task_id` depend on `new_deps` closes a loop.
+
+        Follows blockedBy edges from each new dependency; reaching task_id means
+        task_id must already finish before that dependency, so the new edge would
+        create a cycle.
+        """
+        stack = list(new_deps)
+        seen: set[str] = set()
+        while stack:
+            current = stack.pop()
+            if current == task_id:
+                return True
+            if current in seen:
+                continue
+            seen.add(current)
+            try:
+                current_task = self.load(current)
+            except KeyError:
+                continue
+            stack.extend(current_task.blockedBy)
+        return False
+
+    def incomplete_dependencies(self, task: Task) -> list[str]:
+        """Dependency ids that are not completed (a missing file counts too)."""
+        incomplete: list[str] = []
+        for dep_id in task.blockedBy:
+            try:
+                dep = self.load(dep_id)
+            except KeyError:
+                incomplete.append(dep_id)
+                continue
+            if dep.status != COMPLETED:
+                incomplete.append(dep_id)
+        return incomplete
+
+    def can_start(self, task_id: str) -> bool:
+        """True when every dependency is completed."""
+        return not self.incomplete_dependencies(self.load(task_id))
+
+    # ── Lifecycle ───────────────────────────────────────────────
+
+    def claim(self, task_id: str, owner: str = "agent") -> str:
+        """pending -> in_progress, setting the owner; a message either way."""
+        task = self.load(task_id)
+        if task.status != PENDING:
+            return f"Task {task_id} is {task.status}, cannot claim"
+        dependencies = self.incomplete_dependencies(task)
+        if dependencies:
+            return f"Blocked by: {', '.join(dependencies)}"
+        task.owner = owner
+        task.status = IN_PROGRESS
+        self.save(task)
+        return f"Claimed {task_id} ({task.subject})"
+
+    def complete(self, task_id: str, owner: str = "agent") -> str:
+        """in_progress -> completed; report downstream tasks this unblocked."""
+        task = self.load(task_id)
+        if task.status != IN_PROGRESS:
+            return f"Task {task_id} is {task.status}, cannot complete"
+        if task.owner != owner:
+            return f"Task {task_id} is owned by {task.owner}, not {owner}"
+
+        ready_before = {
+            t.id
+            for t in self.list()
+            if t.status == PENDING and t.blockedBy and self.can_start(t.id)
+        }
+        task.status = COMPLETED
+        self.save(task)
+        unblocked = [
+            t.subject
+            for t in self.list()
+            if t.status == PENDING
+            and t.blockedBy
+            and t.id not in ready_before
+            and self.can_start(t.id)
+        ]
+        message = f"Completed {task_id} ({task.subject})"
+        if unblocked:
+            message += f"\nUnblocked: {', '.join(unblocked)}"
+        return message

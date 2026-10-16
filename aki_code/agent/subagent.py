@@ -18,6 +18,9 @@ EXCLUDED_TOOLS = (
     "create_task",
     "get_task",
     "list_tasks",
+    "update_task",
+    "claim_task",
+    "complete_task",
 )
 
 

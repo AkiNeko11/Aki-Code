@@ -15,11 +15,24 @@ class BashTool(BaseTool):
                 "type": "string",
                 "description": "The shell command to execute",
             },
+            "run_in_background": {
+                "type": "boolean",
+                "description": (
+                    "Set true to run a long-running command (install, build, "
+                    "full test suite) in the background and continue without "
+                    "waiting. The call returns a background task id immediately "
+                    "and you are notified with the result on a later turn. Only "
+                    "use it when the next steps do not depend on this command's "
+                    "output."
+                ),
+            },
         },
         "required": ["command"],
     }
 
-    def execute(self, *, command: str) -> str:
+    def execute(self, *, command: str, run_in_background: bool = False) -> str:
+        # run_in_background is routed by the agent loop before execution reaches
+        # here; on the synchronous path the flag is accepted and ignored.
         # shell=True resolves to cmd.exe on Windows and /bin/sh on POSIX.
         # This must match aki_code.shell.get_execution_shell(), which is what
         # the system prompt reports to the model.

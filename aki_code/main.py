@@ -1,3 +1,5 @@
+import signal
+
 from rich.console import Console
 from rich.markup import escape
 
@@ -17,6 +19,11 @@ from aki_code.todo.manager import TodoManager
 from aki_code.compact import Compactor, is_prompt_too_long
 from aki_code.memory import MemoryStore
 from aki_code.tasks import TaskStore
+from aki_code.background import (
+    BackgroundManager,
+    inject_background_results,
+    should_run_background,
+)
 
 console = Console()
 
@@ -93,6 +100,7 @@ def run() -> None:
     skill_catalog = skill_loader.catalog()
     memory_store = MemoryStore(client, memory_dir=config.MEMORY_DIR)
     task_store = TaskStore(config.TASKS_DIR)
+    background_manager = BackgroundManager()
     system_prompt = build_system_prompt(skill_catalog)
     registry = create_registry(
         client=client,
@@ -107,6 +115,18 @@ def run() -> None:
     command_registry = create_command_registry()
     compactor = Compactor(client, todo_manager=todo_manager, console=console)
     messages: list[dict] = []
+
+    # On SIGTERM, stop any background process groups before leaving. Best effort:
+    # registration can be unavailable on some platforms, and Ctrl+C is already
+    # handled by the KeyboardInterrupt paths below.
+    def _terminate(signum, frame):
+        background_manager.teardown_all()
+        raise SystemExit(0)
+
+    try:
+        signal.signal(signal.SIGTERM, _terminate)
+    except (ValueError, OSError, AttributeError):
+        pass
 
     registry.setup_all()
 
@@ -178,6 +198,8 @@ def run() -> None:
         reactive_retries = 0
 
         while True:
+            # Surface any background jobs that finished since the last turn.
+            inject_background_results(messages, background_manager)
             # Keep the conversation within budget before every model call.
             messages[:] = compactor.prepare(messages, active_request)
             # Snapshot the clean pre-call state so a mid-round failure (e.g. a
@@ -244,7 +266,16 @@ def run() -> None:
                         tool_input=tool_use.input,
                         tool_use_id=tool_use.id,
                     )
-                    result = registry.execute(tool_use.name, **tool_use.input)
+                    # A long-running bash command flagged run_in_background starts
+                    # on a worker thread and returns a placeholder immediately; its
+                    # result is injected as a notification on a later turn.
+                    if should_run_background(tool_use.name, tool_use.input):
+                        bg_id = background_manager.start(
+                            tool_use.input.get("command", "")
+                        )
+                        result = f"[Background task {bg_id} started]"
+                    else:
+                        result = registry.execute(tool_use.name, **tool_use.input)
                     hook_manager.fire(
                         HookEvent.POST_TOOL_USE,
                         tool_name=tool_use.name,
@@ -295,6 +326,7 @@ def run() -> None:
                 console.print(f"\n[bold red]Error:[/bold red] {e}")
                 break
 
+    background_manager.teardown_all()
     registry.teardown_all()
 
 

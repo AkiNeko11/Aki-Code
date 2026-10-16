@@ -47,3 +47,9 @@ MEMORY_DUP_THRESHOLD: float = float(os.getenv("MEMORY_DUP_THRESHOLD", "0.85"))
 # with blockedBy dependencies and owner/claim. Distinct from the in-session
 # TodoWrite checklist (Lesson 05).
 TASKS_DIR: str = os.getenv("TASKS_DIR", ".tasks")
+
+# ── Background tasks (Lesson 11) ─────────────────────────────────
+# Long-running bash commands execute in a daemon thread + own process group;
+# results are collected and injected as notifications on later turns.
+BACKGROUND_JOB_TIMEOUT: int = int(os.getenv("BACKGROUND_JOB_TIMEOUT", "600"))
+BACKGROUND_MAX_OUTPUT_CHARS: int = int(os.getenv("BACKGROUND_MAX_OUTPUT_CHARS", "200000"))

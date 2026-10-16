@@ -194,6 +194,16 @@ def run() -> None:
                 tool_uses = [b for b in response.content if b.type == "tool_use"]
 
                 if not tool_uses:
+                    # Turn complete: extract durable memories, then consolidate
+                    # once the store has grown. Disk-only and best-effort — a
+                    # failure here must never disturb the finished turn.
+                    try:
+                        if memory_store.extract_memories(messages):
+                            memory_store.maybe_consolidate()
+                    except Exception as exc:
+                        console.print(
+                            f"  [dim]memory extraction skipped: {escape(str(exc))}[/dim]"
+                        )
                     break
 
                 tool_results = []

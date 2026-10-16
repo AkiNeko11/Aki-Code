@@ -8,16 +8,37 @@ from pathlib import Path
 from aki_code import config
 from aki_code.agent import extract_text
 from aki_code.llm.client import call_with_retry
-from aki_code.llm.prompts import MEMORY_SELECT_PROMPT
+from aki_code.llm.prompts import (
+    MEMORY_CONSOLIDATION_SYSTEM_PROMPT,
+    MEMORY_EXTRACTION_SYSTEM_PROMPT,
+    MEMORY_SELECT_PROMPT,
+)
 
 # Four durable-knowledge categories (Lesson 09). A candidate memory must carry
 # one of these; anything else is rejected at write time.
 VALID_MEMORY_TYPES = ("user", "feedback", "project", "reference")
 
+# Phrases that mark a candidate as scoped to the current task/session rather
+# than durable. A heuristic second layer over the model's own scope label, so a
+# mislabeled "persistent" candidate that is plainly temporary is still rejected.
+TEMPORARY_MARKERS = (
+    "本次会话", "本会话", "当前会话", "当前任务", "本次任务", "这轮", "临时", "暂时",
+    "this session", "this conversation", "current task", "this task only",
+    "for now", "for this run", "temporary", "just this once", "this time only",
+)
+
 _SLUG_UNSAFE = re.compile(r"[^a-z0-9]+")
 # English words (len >= 2) and individual CJK chars, for keyword recall.
 _TOKEN = re.compile(r"[a-z0-9]{2,}|[\u4e00-\u9fff]")
 _CODE_FENCE = re.compile(r"^```[a-zA-Z]*\s*|\s*```$")
+
+
+def _json_default(obj):
+    """Serialize Anthropic SDK content blocks (pydantic) and anything else."""
+    model_dump = getattr(obj, "model_dump", None)
+    if callable(model_dump):
+        return model_dump()
+    return str(obj)
 
 
 def memory_slug(name: str) -> str:
@@ -107,6 +128,10 @@ class MemoryStore:
         max_recall: int = config.MEMORY_MAX_RECALL,
         recall_char_cap: int = config.MEMORY_RECALL_CHAR_CAP,
         select_max_tokens: int = config.MEMORY_SELECT_MAX_TOKENS,
+        extract_max_tokens: int = config.MEMORY_EXTRACT_MAX_TOKENS,
+        consolidate_max_tokens: int = config.MEMORY_CONSOLIDATE_MAX_TOKENS,
+        consolidate_threshold: int = config.MEMORY_CONSOLIDATE_THRESHOLD,
+        dup_threshold: float = config.MEMORY_DUP_THRESHOLD,
     ):
         self.client = client
         self.memory_dir = Path(memory_dir)
@@ -114,6 +139,10 @@ class MemoryStore:
         self.max_recall = max_recall
         self.recall_char_cap = recall_char_cap
         self.select_max_tokens = select_max_tokens
+        self.extract_max_tokens = extract_max_tokens
+        self.consolidate_max_tokens = consolidate_max_tokens
+        self.consolidate_threshold = consolidate_threshold
+        self.dup_threshold = dup_threshold
         self.memories: list[Memory] = []
 
     # ── Storage ─────────────────────────────────────────────────
@@ -262,6 +291,192 @@ class MemoryStore:
         return "\n\n".join(
             f"## {m.name} ({m.type})\n{m.body.strip()}" for m in memories
         )
+
+    # ── Extraction (write path) ─────────────────────────────────
+
+    def extract_memories(self, messages) -> bool:
+        """Propose durable memories from a finished turn; store the valid ones.
+
+        The model only proposes candidates — nothing is written until it passes
+        the scope filter and should_store_memory. Returns True if at least one
+        memory was persisted.
+        """
+        if self.client is None or not messages:
+            return False
+        self.scan()
+        serialized = json.dumps(messages, default=_json_default, ensure_ascii=False)
+        user_content = (
+            "Extract any durable, reusable memories from the following "
+            "conversation, per your system instructions.\n\nConversation (JSON):\n"
+            + serialized
+        )
+        response = call_with_retry(
+            lambda: self.client.messages.create(
+                model=config.MODEL,
+                max_tokens=self.extract_max_tokens,
+                system=MEMORY_EXTRACTION_SYSTEM_PROMPT,
+                messages=[{"role": "user", "content": user_content}],
+            )
+        )
+        candidates = _parse_json_array(extract_text(response.content))
+        if not candidates:
+            return False
+        stored = False
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            if str(candidate.get("scope", "")).strip().lower() != "persistent":
+                continue
+            if not self.should_store_memory(candidate):
+                continue
+            self.write_memory_file(
+                str(candidate.get("name", "")).strip(),
+                str(candidate.get("type", "")).strip().lower(),
+                str(candidate.get("description", "")).strip(),
+                str(candidate.get("body", "")).strip(),
+            )
+            stored = True
+        return stored
+
+    def should_store_memory(self, candidate) -> bool:
+        """Final quality gate: complete, correctly typed, durable, non-duplicate."""
+        if not isinstance(candidate, dict):
+            return False
+        name = str(candidate.get("name", "")).strip()
+        description = str(candidate.get("description", "")).strip()
+        mem_type = str(candidate.get("type", "")).strip().lower()
+        body = str(candidate.get("body", "")).strip()
+        if not (name and description and body):
+            return False
+        if mem_type not in VALID_MEMORY_TYPES:
+            return False
+        text = f"{description} {body}".lower()
+        if any(marker in text for marker in TEMPORARY_MARKERS):
+            return False
+        return not self._is_duplicate(name, body)
+
+    def _is_duplicate(self, name: str, body: str) -> bool:
+        """True if the store already holds this name or a near-identical body."""
+        slug = memory_slug(name)
+        body_tokens = _tokenize(body)
+        for m in self.memories:
+            if memory_slug(m.name) == slug:
+                return True
+            existing = _tokenize(m.body)
+            if not body_tokens or not existing:
+                continue
+            union = body_tokens | existing
+            if len(body_tokens & existing) / len(union) >= self.dup_threshold:
+                return True
+        return False
+
+    # ── Consolidation ───────────────────────────────────────────
+
+    def maybe_consolidate(self) -> bool:
+        """Consolidate once the store reaches the threshold; else no-op."""
+        self.scan()
+        if len(self.memories) >= self.consolidate_threshold:
+            return self.consolidate_memories()
+        return False
+
+    def consolidate_memories(self) -> bool:
+        """Merge/prune the store via a model pass, with snapshot-and-rollback.
+
+        Best-effort and non-raising: if the model output is unusable or any
+        write fails, the previous files are restored and False is returned, so a
+        bad consolidation can never cost the user their memories.
+        """
+        self.scan()
+        if self.client is None or len(self.memories) < 2:
+            return False
+        records = [
+            {
+                "name": m.name,
+                "description": m.description,
+                "type": m.type,
+                "body": m.body,
+            }
+            for m in self.memories
+        ]
+        user_content = (
+            "Consolidate the following memory records per your system "
+            "instructions.\n\nRecords (JSON):\n"
+            + json.dumps(records, ensure_ascii=False)
+        )
+        try:
+            response = call_with_retry(
+                lambda: self.client.messages.create(
+                    model=config.MODEL,
+                    max_tokens=self.consolidate_max_tokens,
+                    system=MEMORY_CONSOLIDATION_SYSTEM_PROMPT,
+                    messages=[{"role": "user", "content": user_content}],
+                )
+            )
+        except Exception:
+            return False
+        validated = self._validate_consolidated(
+            _parse_json_array(extract_text(response.content))
+        )
+        if validated is None:
+            return False
+        return self._replace_all(validated)
+
+    def _validate_consolidated(self, raw) -> list[dict] | None:
+        """Strictly validate a consolidated list; None means abort (touch nothing)."""
+        if not isinstance(raw, list) or not raw:
+            return None
+        validated: list[dict] = []
+        for record in raw:
+            if not isinstance(record, dict):
+                return None
+            name = str(record.get("name", "")).strip()
+            body = str(record.get("body", "")).strip()
+            mem_type = str(record.get("type", "")).strip().lower()
+            if not (name and body) or mem_type not in VALID_MEMORY_TYPES:
+                return None
+            validated.append(
+                {
+                    "name": name,
+                    "description": str(record.get("description", "")).strip(),
+                    "type": mem_type,
+                    "body": body,
+                }
+            )
+        return validated
+
+    def _replace_all(self, records: list[dict]) -> bool:
+        """Atomically swap all memory files for `records`; restore on failure."""
+        self.memory_dir.mkdir(parents=True, exist_ok=True)
+        snapshot = {
+            path.name: path.read_text(encoding="utf-8")
+            for path in self.memory_dir.glob("*.md")
+            if path.name != self.index_name
+        }
+        try:
+            for path in self.memory_dir.glob("*.md"):
+                if path.name != self.index_name:
+                    path.unlink()
+            for record in records:
+                path = self.memory_dir / f"{memory_slug(record['name'])}.md"
+                path.write_text(
+                    memory_document(
+                        record["name"],
+                        record["type"],
+                        record["description"],
+                        record["body"],
+                    ),
+                    encoding="utf-8",
+                )
+            self.rebuild_memory_index()
+            return True
+        except Exception:
+            for path in self.memory_dir.glob("*.md"):
+                if path.name != self.index_name:
+                    path.unlink()
+            for filename, content in snapshot.items():
+                (self.memory_dir / filename).write_text(content, encoding="utf-8")
+            self.rebuild_memory_index()
+            return False
 
     # ── Frontmatter (flat key: value; mirrors SkillLoader, no YAML dep) ──
 

@@ -7,9 +7,18 @@ from aki_code.llm.client import call_with_retry
 from aki_code.hooks.manager import HookEvent
 
 MAX_TURNS = 30
-# The subagent shares the registry but must not recurse, touch shared state, or
-# request compaction (its loop does not run the prepare() pipeline).
-EXCLUDED_TOOLS = ("task", "todo_write", "compact")
+# The subagent shares the registry but must not recurse, touch shared state
+# (the todo list, the durable task graph), or request compaction (its loop does
+# not run the prepare() pipeline). Task claiming is the parent's job until
+# multi-agent coordination lands.
+EXCLUDED_TOOLS = (
+    "task",
+    "todo_write",
+    "compact",
+    "create_task",
+    "get_task",
+    "list_tasks",
+)
 
 
 def extract_text(content) -> str:

@@ -122,6 +122,22 @@ class TodoCommand(BaseCommand):
         return CommandResult()
 
 
+class TasksCommand(BaseCommand):
+    name = "tasks"
+    aliases = ()
+    description = "List tasks in the durable task store"
+
+    def execute(self, ctx: CommandContext, args: str) -> CommandResult:
+        tasks = ctx.task_store.list()
+        if not tasks:
+            ctx.console.print("[dim](no tasks)[/dim]")
+            return CommandResult()
+        ctx.console.print("[bold]Tasks:[/bold]")
+        for t in tasks:
+            ctx.console.print(f"  [dim]{escape(t.one_line())}[/dim]")
+        return CommandResult()
+
+
 class SkillCommand(BaseCommand):
     name = "skill"
     aliases = ("skills",)

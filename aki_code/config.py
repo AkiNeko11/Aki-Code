@@ -41,3 +41,9 @@ MEMORY_EXTRACT_MAX_TOKENS: int = int(os.getenv("MEMORY_EXTRACT_MAX_TOKENS", "102
 MEMORY_CONSOLIDATE_MAX_TOKENS: int = int(os.getenv("MEMORY_CONSOLIDATE_MAX_TOKENS", "2048"))
 MEMORY_CONSOLIDATE_THRESHOLD: int = int(os.getenv("MEMORY_CONSOLIDATE_THRESHOLD", "10"))
 MEMORY_DUP_THRESHOLD: float = float(os.getenv("MEMORY_DUP_THRESHOLD", "0.85"))
+
+# ── Task system (Lesson 10) ──────────────────────────────────────
+# Durable, cross-session task graph: one JSON file per task under TASKS_DIR,
+# with blockedBy dependencies and owner/claim. Distinct from the in-session
+# TodoWrite checklist (Lesson 05).
+TASKS_DIR: str = os.getenv("TASKS_DIR", ".tasks")

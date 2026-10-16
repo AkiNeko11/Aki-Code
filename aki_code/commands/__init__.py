@@ -7,6 +7,7 @@ from aki_code.commands.builtin import (
     MemoryCommand,
     ModeCommand,
     SkillCommand,
+    TasksCommand,
     TodoCommand,
     UsageCommand,
 )
@@ -21,6 +22,7 @@ def create_command_registry() -> CommandRegistry:
     reg.register(HooksCommand())
     reg.register(ModeCommand())
     reg.register(TodoCommand())
+    reg.register(TasksCommand())
     reg.register(SkillCommand())
     reg.register(MemoryCommand())
     reg.register(CompactCommand())

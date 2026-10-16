@@ -7,9 +7,13 @@ from aki_code.tools.glob import GlobTool
 from aki_code.tools.todo_write import TodoWriteTool
 from aki_code.tools.load_skill import LoadSkillTool
 from aki_code.tools.compact import CompactTool
+from aki_code.tools.task_create import CreateTaskTool
+from aki_code.tools.task_get import GetTaskTool
+from aki_code.tools.task_list import ListTasksTool
 from aki_code.tools.task import TaskTool
 from aki_code.todo.manager import TodoManager
 from aki_code.skills.loader import SkillLoader
+from aki_code.tasks.store import TaskStore
 
 
 def create_registry(
@@ -19,6 +23,7 @@ def create_registry(
     hook_manager,
     todo_manager: TodoManager,
     skill_loader: SkillLoader,
+    task_store: TaskStore,
     ask_permission,
     console,
 ) -> ToolRegistry:
@@ -31,6 +36,9 @@ def create_registry(
     reg.register(TodoWriteTool(todo_manager))
     reg.register(LoadSkillTool(skill_loader))
     reg.register(CompactTool())
+    reg.register(CreateTaskTool(task_store))
+    reg.register(GetTaskTool(task_store))
+    reg.register(ListTasksTool(task_store))
     reg.register(TaskTool(
         client=client,
         registry=reg,

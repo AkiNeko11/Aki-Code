@@ -16,6 +16,7 @@ from aki_code.skills.loader import SkillLoader
 from aki_code.todo.manager import TodoManager
 from aki_code.compact import Compactor, is_prompt_too_long
 from aki_code.memory import MemoryStore
+from aki_code.tasks import TaskStore
 
 console = Console()
 
@@ -91,6 +92,7 @@ def run() -> None:
     # recalled per turn, so the full system prompt is rebuilt each request.
     skill_catalog = skill_loader.catalog()
     memory_store = MemoryStore(client, memory_dir=config.MEMORY_DIR)
+    task_store = TaskStore(config.TASKS_DIR)
     system_prompt = build_system_prompt(skill_catalog)
     registry = create_registry(
         client=client,
@@ -98,6 +100,7 @@ def run() -> None:
         hook_manager=hook_manager,
         todo_manager=todo_manager,
         skill_loader=skill_loader,
+        task_store=task_store,
         ask_permission=_request_permission,
         console=console,
     )
@@ -141,6 +144,7 @@ def run() -> None:
                 skill_loader=skill_loader,
                 compactor=compactor,
                 memory_store=memory_store,
+                task_store=task_store,
             )
             if command_registry.dispatch(user_input, ctx).action == CommandAction.EXIT:
                 break

@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from aki_code.security.permission import PermissionManager
     from aki_code.session import SessionSettings
     from aki_code.skills.loader import SkillLoader
+    from aki_code.tasks.store import TaskStore
     from aki_code.todo.manager import TodoManager
 
 
@@ -40,6 +41,7 @@ class CommandContext:
     skill_loader: "SkillLoader"
     compactor: "Compactor"
     memory_store: "MemoryStore"
+    task_store: "TaskStore"
 
 
 class BaseCommand(ABC):

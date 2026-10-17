@@ -60,3 +60,8 @@ BACKGROUND_MAX_OUTPUT_CHARS: int = int(os.getenv("BACKGROUND_MAX_OUTPUT_CHARS", 
 SCHEDULES_FILE: str = os.getenv("SCHEDULES_FILE", ".scheduled_tasks.json")
 CRON_POLL_INTERVAL: float = float(os.getenv("CRON_POLL_INTERVAL", "1.0"))
 CRON_PROCESSOR_INTERVAL: float = float(os.getenv("CRON_PROCESSOR_INTERVAL", "0.2"))
+
+# ── Agent teams (Lesson 13) ──────────────────────────────────────
+# Per-agent file mailboxes for Lead/teammate communication, kept out of the
+# model context until the runtime delivers them.
+MAILBOX_DIR: str = os.getenv("MAILBOX_DIR", ".mailboxes")

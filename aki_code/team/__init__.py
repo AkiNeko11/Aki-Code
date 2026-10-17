@@ -10,6 +10,7 @@ from aki_code.team.bus import (
     MessageBus,
 )
 from aki_code.team.roles import TEAMMATE_EXCLUDED_TOOLS, teammate_schemas
+from aki_code.team.teammate import TeammateRuntime, spawn_teammate
 
 __all__ = [
     "MessageBus",
@@ -23,4 +24,6 @@ __all__ = [
     "MSG_PLAN_APPROVAL_RESPONSE",
     "TEAMMATE_EXCLUDED_TOOLS",
     "teammate_schemas",
+    "TeammateRuntime",
+    "spawn_teammate",
 ]

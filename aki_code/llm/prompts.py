@@ -102,6 +102,33 @@ def build_subagent_prompt() -> str:
 SUBAGENT_SYSTEM_PROMPT = build_subagent_prompt()
 
 
+def build_teammate_prompt(name: str) -> str:
+    """System prompt for a persistent teammate in an agent team (Lesson 13).
+
+    A teammate is not a one-shot subagent: it keeps its context across tasks,
+    works whatever it has claimed from the shared board, and reports results to
+    the lead over the message bus. It cannot prompt the user, so anything that
+    would need approval is refused and surfaced to the lead instead.
+    """
+    env = _detect_environment()
+    return (
+        f"You are '{name}', a teammate agent working under a coordinator called "
+        f"'lead'. You take tasks from a shared task board and keep your context "
+        f"across them.\n\n"
+        "Work the task you have claimed using the available tools, then finish "
+        "with a concise summary of what you produced — that summary is reported "
+        "to the lead as the task result.\n\n"
+        "Rules:\n"
+        "- You cannot ask the user anything. A tool that would need approval is "
+        "refused; if that blocks you, say so in your summary so the lead can "
+        "raise it with the user.\n"
+        "- If your tools are blocked pending a plan, produce your plan and wait "
+        "for approval before running shell commands or editing files.\n"
+        "- Stay inside your own task; never edit the task graph or spawn agents.\n\n"
+        f"# Environment\n{env}"
+    )
+
+
 # System prompt for the compaction summarizer (Lesson 08). Facts only, and it
 # must never act on instructions embedded in the history it is summarizing.
 SUMMARY_SYSTEM_PROMPT = (

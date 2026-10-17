@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 
 
@@ -24,25 +25,29 @@ class TokenUsage:
 class TokenTracker:
     """Accumulates token usage across LLM calls in a session.
 
-    Registered as a POST_LLM_CALL hook; queried by the /usage command.
+    Registered as a POST_LLM_CALL hook; queried by the /usage command. A lock
+    guards accumulation because teammate agents (Lesson 13) fire this hook from
+    their own threads concurrently with the lead.
     """
 
     def __init__(self) -> None:
         self._usage = TokenUsage()
+        self._lock = threading.Lock()
 
     def add_from_response(self, response) -> None:
         usage = getattr(response, "usage", None)
         if usage is None:
             return
-        self._usage.input_tokens += getattr(usage, "input_tokens", 0) or 0
-        self._usage.output_tokens += getattr(usage, "output_tokens", 0) or 0
-        self._usage.cache_read_input_tokens += (
-            getattr(usage, "cache_read_input_tokens", 0) or 0
-        )
-        self._usage.cache_creation_input_tokens += (
-            getattr(usage, "cache_creation_input_tokens", 0) or 0
-        )
-        self._usage.calls += 1
+        with self._lock:
+            self._usage.input_tokens += getattr(usage, "input_tokens", 0) or 0
+            self._usage.output_tokens += getattr(usage, "output_tokens", 0) or 0
+            self._usage.cache_read_input_tokens += (
+                getattr(usage, "cache_read_input_tokens", 0) or 0
+            )
+            self._usage.cache_creation_input_tokens += (
+                getattr(usage, "cache_creation_input_tokens", 0) or 0
+            )
+            self._usage.calls += 1
 
     def on_post_llm_call(self, ctx) -> None:
         response = ctx.data.get("response")

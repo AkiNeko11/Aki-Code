@@ -58,3 +58,5 @@ BACKGROUND_MAX_OUTPUT_CHARS: int = int(os.getenv("BACKGROUND_MAX_OUTPUT_CHARS", 
 # Durable job definitions (durable=True) persist to a single JSON file, written
 # atomically. In-memory jobs (durable=False) vanish on restart.
 SCHEDULES_FILE: str = os.getenv("SCHEDULES_FILE", ".scheduled_tasks.json")
+CRON_POLL_INTERVAL: float = float(os.getenv("CRON_POLL_INTERVAL", "1.0"))
+CRON_PROCESSOR_INTERVAL: float = float(os.getenv("CRON_PROCESSOR_INTERVAL", "0.2"))

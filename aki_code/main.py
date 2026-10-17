@@ -1,4 +1,5 @@
 import signal
+import threading
 
 from rich.console import Console
 from rich.markup import escape
@@ -34,6 +35,16 @@ def _request_permission(tool_name: str, tool_input: dict, reason: str) -> bool:
     console.print(f"  [dim]{escape(f'{tool_name}({tool_input})')}[/dim]")
     answer = console.input("  [yellow]Allow? (y/n): [/yellow]").strip().lower()
     return answer.startswith("y")
+
+
+def _deny_permission(tool_name: str, tool_input: dict, reason: str) -> bool:
+    """Non-interactive stand-in: a scheduled turn cannot prompt on stdin.
+
+    Used when the agent loop runs on the cron processor thread, where reading
+    the terminal would collide with the main REPL. Anything needing approval is
+    refused rather than blocking.
+    """
+    return False
 
 
 def _display_tool_result(result: str) -> None:
@@ -109,7 +120,6 @@ def run() -> None:
         # Report a corrupt schedule file loudly rather than silently starting
         # with no jobs (the course requires the error to surface).
         console.print(f"[bold red]Schedule load error:[/bold red] {exc}")
-    system_prompt = build_system_prompt(skill_catalog)
     registry = create_registry(
         client=client,
         permission_manager=permission_manager,
@@ -125,10 +135,17 @@ def run() -> None:
     compactor = Compactor(client, todo_manager=todo_manager, console=console)
     messages: list[dict] = []
 
-    # On SIGTERM, stop any background process groups before leaving. Best effort:
-    # registration can be unavailable on some platforms, and Ctrl+C is already
-    # handled by the KeyboardInterrupt paths below.
+    # Serializes agent turns: the main REPL holds it while reading input is NOT
+    # happening, and the cron processor acquires it (non-blocking) so a scheduled
+    # turn never overlaps a user turn on the shared `messages`/console.
+    agent_lock = threading.Lock()
+    stop_event = threading.Event()
+
+    # On SIGTERM, stop the scheduler and any background process groups before
+    # leaving. Best effort: registration can be unavailable on some platforms,
+    # and Ctrl+C is already handled by the KeyboardInterrupt paths below.
     def _terminate(signum, frame):
+        stop_event.set()
         background_manager.teardown_all()
         raise SystemExit(0)
 
@@ -145,53 +162,18 @@ def run() -> None:
     # Consecutive tool rounds without a todo_write; at 3 we nudge the model.
     rounds_since_todo = 0
 
-    while True:
-        # A dangling user message means the previous turn failed after retries.
-        # Offer to retry it instead of forcing the user to retype.
-        retrying = bool(messages) and messages[-1]["role"] == "user"
-        if retrying:
-            console.print(
-                "[dim]Last request failed. Press Enter to retry, "
-                "or type a new message.[/dim]"
-            )
+    def run_agent_turn(active_request: str, interactive: bool) -> bool:
+        """Run one full agent turn (model + tool rounds) over the shared messages.
 
-        user_input = _read_input()
-        if user_input is None:
-            console.print("\n[dim]Bye![/dim]")
-            break
-
-        # Slash commands are intercepted before anything touches the conversation.
-        if user_input.startswith("/"):
-            ctx = CommandContext(
-                console=console,
-                messages=messages,
-                token_tracker=token_tracker,
-                commands=command_registry,
-                settings=settings,
-                permission_manager=permission_manager,
-                todo_manager=todo_manager,
-                skill_loader=skill_loader,
-                compactor=compactor,
-                memory_store=memory_store,
-                task_store=task_store,
-            )
-            if command_registry.dispatch(user_input, ctx).action == CommandAction.EXIT:
-                break
-            continue
-
-        if retrying:
-            if user_input:
-                messages[-1] = {"role": "user", "content": user_input}
-                active_request = user_input
-            else:
-                prev = messages[-1].get("content")
-                active_request = prev if isinstance(prev, str) else ""
-        else:
-            if not user_input:
-                continue
-            hook_manager.fire(HookEvent.ON_USER_INPUT, user_input=user_input)
-            messages.append({"role": "user", "content": user_input})
-            active_request = user_input
+        Shared by the main REPL and the cron processor thread; the caller must
+        hold agent_lock. Returns True if the turn completed, False if it was
+        interrupted or errored (after rolling back to the pre-call snapshot).
+        `interactive` picks the permission callback: a scheduled turn runs on
+        another thread and cannot prompt on stdin, so it auto-denies anything
+        that would need approval.
+        """
+        nonlocal rounds_since_todo
+        ask = _request_permission if interactive else _deny_permission
 
         # Recall memories relevant to this request and rebuild the system prompt
         # (skill catalog is static; only the memory section changes per turn).
@@ -239,7 +221,7 @@ def run() -> None:
                         console.print(
                             f"  [dim]memory extraction skipped: {escape(str(exc))}[/dim]"
                         )
-                    break
+                    return True
 
                 tool_results = []
                 compact_requested = False
@@ -257,7 +239,7 @@ def run() -> None:
                         continue
 
                     if decision == "ask":
-                        if not _request_permission(tool_use.name, tool_use.input, reason):
+                        if not ask(tool_use.name, tool_use.input, reason):
                             tool_results.append({
                                 "type": "tool_result",
                                 "tool_use_id": tool_use.id,
@@ -321,7 +303,7 @@ def run() -> None:
             except KeyboardInterrupt:
                 del messages[snapshot:]
                 console.print("\n[dim]Interrupted.[/dim]")
-                break
+                return False
             except Exception as e:
                 if (
                     is_prompt_too_long(e)
@@ -333,8 +315,102 @@ def run() -> None:
                 del messages[snapshot:]
                 hook_manager.fire(HookEvent.ON_ERROR, error=str(e))
                 console.print(f"\n[bold red]Error:[/bold red] {e}")
-                break
+                return False
 
+    def run_scheduled_turn() -> None:
+        """Deliver due cron jobs as one agent turn (called under agent_lock).
+
+        The fired prompts become a single [Scheduled] user message. On failure
+        the conversation is restored and the jobs requeued for a later attempt
+        (at-least-once delivery); on success one-shot jobs are removed and
+        recurring jobs are re-armed.
+        """
+        fired = scheduler.consume_cron_queue()
+        if not fired:
+            return
+        saved = list(messages)
+        content = "\n".join(f"[Scheduled] {job.prompt}" for job in fired)
+        block = {"type": "text", "text": content}
+        # Merge into a trailing user message when there is one (e.g. a dangling
+        # request left by a failed turn) so roles keep alternating; otherwise
+        # start a fresh user turn. Replace rather than mutate so `saved` restores
+        # cleanly on failure.
+        if messages and messages[-1].get("role") == "user":
+            prev = messages[-1].get("content")
+            merged = (
+                prev + [block]
+                if isinstance(prev, list)
+                else [{"type": "text", "text": prev}, block]
+            )
+            messages[-1] = {"role": "user", "content": merged}
+        else:
+            messages.append({"role": "user", "content": [block]})
+
+        console.print(f"  [magenta]⏰ {len(fired)} scheduled task(s) firing[/magenta]")
+        if run_agent_turn(content, interactive=False):
+            scheduler.finalize_delivery(fired)
+        else:
+            messages[:] = saved
+            scheduler.requeue(fired)
+
+    # Start the cron runtime only for the live CLI; importing this module must
+    # not spawn threads.
+    scheduler.start(agent_lock, run_scheduled_turn)
+
+    while True:
+        # A dangling user message means the previous turn failed after retries.
+        # This lock-free peek only drives the hint; the authoritative recheck
+        # happens under agent_lock below (a scheduled turn may change the tail).
+        if bool(messages) and messages[-1]["role"] == "user":
+            console.print(
+                "[dim]Last request failed. Press Enter to retry, "
+                "or type a new message.[/dim]"
+            )
+
+        user_input = _read_input()
+        if user_input is None:
+            console.print("\n[dim]Bye![/dim]")
+            break
+
+        with agent_lock:
+            # Slash commands are intercepted before anything touches the convo.
+            if user_input.startswith("/"):
+                ctx = CommandContext(
+                    console=console,
+                    messages=messages,
+                    token_tracker=token_tracker,
+                    commands=command_registry,
+                    settings=settings,
+                    permission_manager=permission_manager,
+                    todo_manager=todo_manager,
+                    skill_loader=skill_loader,
+                    compactor=compactor,
+                    memory_store=memory_store,
+                    task_store=task_store,
+                )
+                if command_registry.dispatch(user_input, ctx).action == CommandAction.EXIT:
+                    break
+                continue
+
+            retrying = bool(messages) and messages[-1]["role"] == "user"
+            if retrying:
+                if user_input:
+                    messages[-1] = {"role": "user", "content": user_input}
+                    active_request = user_input
+                else:
+                    prev = messages[-1].get("content")
+                    active_request = prev if isinstance(prev, str) else ""
+            else:
+                if not user_input:
+                    continue
+                hook_manager.fire(HookEvent.ON_USER_INPUT, user_input=user_input)
+                messages.append({"role": "user", "content": user_input})
+                active_request = user_input
+
+            run_agent_turn(active_request, interactive=True)
+
+    stop_event.set()
+    scheduler.stop()
     background_manager.teardown_all()
     registry.teardown_all()
 

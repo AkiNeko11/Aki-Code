@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import os
 
-from aki_code.tools.base import BaseTool
+from aki_code.tools.base import WorkspaceTool
 
 
-class EditFileTool(BaseTool):
+class EditFileTool(WorkspaceTool):
     name = "edit_file"
     description = "Replace a unique string in a file. old_string must appear exactly once."
     input_schema = {
@@ -28,6 +28,7 @@ class EditFileTool(BaseTool):
     }
 
     def execute(self, *, path: str, old_string: str, new_string: str) -> str:
+        path = self._resolve(path)
         if not os.path.exists(path):
             return f"Error: file not found: {path}"
         try:

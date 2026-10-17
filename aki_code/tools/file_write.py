@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import os
 
-from aki_code.tools.base import BaseTool
+from aki_code.tools.base import WorkspaceTool
 
 
-class WriteFileTool(BaseTool):
+class WriteFileTool(WorkspaceTool):
     name = "write_file"
     description = "Write content to a file. Creates file and parent directories if needed. Overwrites existing content."
     input_schema = {
@@ -25,6 +25,7 @@ class WriteFileTool(BaseTool):
 
     def execute(self, *, path: str, content: str) -> str:
         try:
+            path = self._resolve(path)
             parent = os.path.dirname(path)
             if parent:
                 os.makedirs(parent, exist_ok=True)

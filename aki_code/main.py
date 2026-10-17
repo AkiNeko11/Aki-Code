@@ -130,14 +130,13 @@ def run() -> None:
         # with no jobs (the course requires the error to surface).
         console.print(f"[bold red]Schedule load error:[/bold red] {exc}")
     bus = MessageBus(config.MAILBOX_DIR)
-    # TeamManager needs the registry (teammates run tools through it) and the
-    # registry needs TeamManager (Lead tools), so build it registry-less and
-    # late-bind, the same way TaskTool receives the registry under construction.
+    # Each teammate builds its own cwd-bound registry, so TeamManager only needs
+    # the skill loader (not the lead registry) — no circular wiring.
     team_manager = TeamManager(
         bus=bus,
         task_store=task_store,
         client=client,
-        registry=None,
+        skill_loader=skill_loader,
         permission_manager=permission_manager,
         hook_manager=hook_manager,
         console=console,
@@ -154,7 +153,6 @@ def run() -> None:
         ask_permission=_request_permission,
         console=console,
     )
-    team_manager.registry = registry
     command_registry = create_command_registry()
     compactor = Compactor(client, todo_manager=todo_manager, console=console)
     messages: list[dict] = []

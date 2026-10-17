@@ -24,6 +24,7 @@ from aki_code.tools.team import (
     SpawnTeammateTool,
     SubmitPlanTool,
 )
+from aki_code.tools.create_worktree import CreateWorktreeTool
 from aki_code.tools.task import TaskTool
 from aki_code.todo.manager import TodoManager
 from aki_code.skills.loader import SkillLoader
@@ -68,7 +69,7 @@ def create_registry(
     reg.register(RequestPlanTool(team_manager))
     reg.register(ApprovePlanTool(team_manager))
     reg.register(ShutdownTeammateTool(team_manager))
-    reg.register(SubmitPlanTool())
+    reg.register(CreateWorktreeTool(task_store))
     reg.register(TaskTool(
         client=client,
         registry=reg,
@@ -77,4 +78,29 @@ def create_registry(
         ask_permission=ask_permission,
         console=console,
     ))
+    return reg
+
+
+def create_teammate_registry(*, cwd_provider, task_store, skill_loader) -> ToolRegistry:
+    """A teammate's own tool set (Lesson 13).
+
+    Workspace tools are bound to the teammate's current task directory via
+    cwd_provider, so parallel teammates can edit separate worktrees. Only the
+    tools a teammate may use are registered: file/shell (cwd-bound), skill
+    loading, reading and claiming/completing tasks, and submit_plan (intercepted
+    by the runtime). Lead-only tools — graph editing, team control, worktree
+    creation, cron, subagent recursion, compaction — are simply absent.
+    """
+    reg = ToolRegistry()
+    reg.register(BashTool(cwd_provider))
+    reg.register(ReadFileTool(cwd_provider))
+    reg.register(WriteFileTool(cwd_provider))
+    reg.register(EditFileTool(cwd_provider))
+    reg.register(GlobTool(cwd_provider))
+    reg.register(LoadSkillTool(skill_loader))
+    reg.register(ListTasksTool(task_store))
+    reg.register(GetTaskTool(task_store))
+    reg.register(ClaimTaskTool(task_store))
+    reg.register(CompleteTaskTool(task_store))
+    reg.register(SubmitPlanTool())
     return reg

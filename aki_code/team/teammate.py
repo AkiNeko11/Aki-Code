@@ -22,6 +22,7 @@ from aki_code.team.bus import (
 )
 from aki_code.team.protocol import new_request_id
 from aki_code.team.roles import TEAMMATE_EXCLUDED_TOOLS, teammate_schemas
+from aki_code.team.worktree import WorktreeError, resolve_task_cwd
 
 # Plan gate: mutating tools are blocked unless the plan is not required or has
 # been approved. Read-only tools are never gated.
@@ -56,8 +57,8 @@ class TeammateRuntime:
         *,
         name: str,
         client,
-        registry,
         task_store,
+        skill_loader,
         bus: MessageBus,
         permission_manager,
         hook_manager,
@@ -70,7 +71,6 @@ class TeammateRuntime:
     ):
         self.name = name
         self.client = client
-        self.registry = registry
         self.task_store = task_store
         self.bus = bus
         self.permission_manager = permission_manager
@@ -90,6 +90,21 @@ class TeammateRuntime:
         self._pending_directive = False
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+
+        # A teammate gets its OWN registry with workspace tools bound to its
+        # current task directory (self.cwd), so parallel teammates edit separate
+        # checkouts. Imported lazily: team.teammate <- tools <- tools.team <-
+        # team.manager <- team.teammate would otherwise be a circular import.
+        from aki_code.tools import create_teammate_registry
+
+        self.registry = create_teammate_registry(
+            cwd_provider=self._current_cwd,
+            task_store=task_store,
+            skill_loader=skill_loader,
+        )
+
+    def _current_cwd(self) -> str:
+        return self.cwd
 
     # ── lifecycle ───────────────────────────────────────────────
 
@@ -125,11 +140,24 @@ class TeammateRuntime:
 
             task = self.task_store.claim_next_task(self.name)
             if task is not None:
-                self._begin_task(task)
+                try:
+                    self._begin_task(task)
+                except WorktreeError as exc:
+                    # A broken worktree binding: report to the lead rather than
+                    # dying or silently running in the repo. The task stays
+                    # claimed so the lead can rebind or cancel it.
+                    self.bus.send(
+                        self.name, "lead",
+                        f"Cannot start task {task.id}: {exc}", MSG_RESULT,
+                        {"task_id": task.id},
+                    )
 
     def _begin_task(self, task) -> None:
+        # Resolve the working directory first so a broken binding raises before
+        # any state is mutated.
+        cwd = self._resolve_cwd(task)
         self.current_task = task
-        self.cwd = self._resolve_cwd(task)
+        self.cwd = cwd
         # Claiming changes task identity, so any prior plan approval is stale.
         self.work_version += 1
         self.gate_task_id = task.id
@@ -141,9 +169,10 @@ class TeammateRuntime:
         })
 
     def _resolve_cwd(self, task) -> str:
-        # Phase E resolves a task's worktree binding; until then every task runs
-        # in the repository working directory.
-        return self.workdir
+        # A task bound to a worktree runs there; an unbound task runs in the
+        # repository directory. A missing/invalid binding raises rather than
+        # silently falling back to the repo (the caller reports it).
+        return resolve_task_cwd(task, self.workdir)
 
     # ── WORK loop ───────────────────────────────────────────────
 
@@ -306,8 +335,8 @@ def spawn_teammate(
     name: str,
     task_id: str,
     client,
-    registry,
     task_store,
+    skill_loader,
     bus: MessageBus,
     permission_manager,
     hook_manager,
@@ -319,19 +348,25 @@ def spawn_teammate(
 ) -> TeammateRuntime:
     """Claim the initial task, then start a teammate thread for it.
 
-    The claim happens before the thread starts: if the task cannot be claimed
+    The working directory is validated and the task claimed before the thread
+    starts: if the worktree binding is broken or the task cannot be claimed
     (already taken, blocked, or the owner is busy) no teammate is spawned and a
     ValueError carrying the reason is raised.
     """
+    base = workdir or os.getcwd()
+    task = task_store.load(task_id)  # raises KeyError if unknown
+    try:
+        resolve_task_cwd(task, base)  # fail before claiming on a broken binding
+    except WorktreeError as exc:
+        raise ValueError(str(exc)) from exc
     claim_message = task_store.claim(task_id, name)
     if not claim_message.startswith("Claimed"):
         raise ValueError(claim_message)
-    task = task_store.load(task_id)
     runtime = TeammateRuntime(
         name=name,
         client=client,
-        registry=registry,
         task_store=task_store,
+        skill_loader=skill_loader,
         bus=bus,
         permission_manager=permission_manager,
         hook_manager=hook_manager,

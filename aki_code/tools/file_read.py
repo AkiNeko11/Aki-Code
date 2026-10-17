@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import os
 
-from aki_code.tools.base import BaseTool
+from aki_code.tools.base import WorkspaceTool
 
 
-class ReadFileTool(BaseTool):
+class ReadFileTool(WorkspaceTool):
     name = "read_file"
     description = "Read the contents of a file. Returns content with line numbers."
     input_schema = {
@@ -20,6 +20,7 @@ class ReadFileTool(BaseTool):
     }
 
     def execute(self, *, path: str) -> str:
+        path = self._resolve(path)
         if not os.path.exists(path):
             return f"Error: file not found: {path}"
         if not os.path.isfile(path):

@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import subprocess
 
-from aki_code.tools.base import BaseTool
+from aki_code.tools.base import WorkspaceTool
 
 
-class BashTool(BaseTool):
+class BashTool(WorkspaceTool):
     name = "bash"
     description = "Run a shell command. Returns stdout, stderr and exit code."
     input_schema = {
@@ -43,6 +43,7 @@ class BashTool(BaseTool):
                 capture_output=True,
                 text=True,
                 timeout=120,
+                cwd=self._cwd(),
             )
         except subprocess.TimeoutExpired:
             return "Error: command timed out after 120s"

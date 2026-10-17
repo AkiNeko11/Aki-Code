@@ -65,3 +65,6 @@ CRON_PROCESSOR_INTERVAL: float = float(os.getenv("CRON_PROCESSOR_INTERVAL", "0.2
 # Per-agent file mailboxes for Lead/teammate communication, kept out of the
 # model context until the runtime delivers them.
 MAILBOX_DIR: str = os.getenv("MAILBOX_DIR", ".mailboxes")
+# Optional per-task git worktrees so parallel edits do not collide; a task with
+# no worktree runs in the repository working directory.
+WORKTREES_DIR: str = os.getenv("WORKTREES_DIR", ".worktrees")

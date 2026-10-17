@@ -200,4 +200,12 @@ class PermissionManager:
                 return "allow", "Auto-accepted edit (accept-edits mode)"
             return "ask", f"File modification: {args.get('path', 'unknown')}"
 
+        # Creating a worktree mutates git state (new branch + checkout), so it
+        # always asks, even in accept-edits mode.
+        if tool_name == "create_worktree":
+            return "ask", (
+                f"Create git worktree '{args.get('name', '?')}' "
+                f"for task {args.get('task_id', '?')}"
+            )
+
         return "allow", "Passed all checks"

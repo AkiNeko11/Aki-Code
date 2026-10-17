@@ -43,7 +43,7 @@ class TeamManager:
         bus: MessageBus,
         task_store,
         client,
-        registry,
+        skill_loader,
         permission_manager,
         hook_manager,
         console=None,
@@ -52,7 +52,7 @@ class TeamManager:
         self.bus = bus
         self.task_store = task_store
         self.client = client
-        self.registry = registry
+        self.skill_loader = skill_loader
         self.permission_manager = permission_manager
         self.hook_manager = hook_manager
         self.console = console
@@ -72,8 +72,8 @@ class TeamManager:
                     name=name,
                     task_id=task_id,
                     client=self.client,
-                    registry=self.registry,
                     task_store=self.task_store,
+                    skill_loader=self.skill_loader,
                     bus=self.bus,
                     permission_manager=self.permission_manager,
                     hook_manager=self.hook_manager,

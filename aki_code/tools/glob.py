@@ -3,10 +3,10 @@ from __future__ import annotations
 import glob as glob_mod
 import os
 
-from aki_code.tools.base import BaseTool
+from aki_code.tools.base import WorkspaceTool
 
 
-class GlobTool(BaseTool):
+class GlobTool(WorkspaceTool):
     name = "glob"
     description = "Find files by glob pattern. Supports recursive ** matching."
     input_schema = {
@@ -26,7 +26,7 @@ class GlobTool(BaseTool):
 
     def execute(self, *, pattern: str, path: str = ".") -> str:
         try:
-            full_pattern = os.path.join(path, pattern)
+            full_pattern = os.path.join(self._resolve(path), pattern)
             matches = sorted(glob_mod.glob(full_pattern, recursive=True))
             if not matches:
                 return f"No files matching: {full_pattern}"

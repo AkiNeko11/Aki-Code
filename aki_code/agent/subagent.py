@@ -21,6 +21,9 @@ EXCLUDED_TOOLS = (
     "update_task",
     "claim_task",
     "complete_task",
+    "schedule_cron",
+    "list_crons",
+    "cancel_cron",
 )
 
 

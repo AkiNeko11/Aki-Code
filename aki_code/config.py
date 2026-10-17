@@ -53,3 +53,8 @@ TASKS_DIR: str = os.getenv("TASKS_DIR", ".tasks")
 # results are collected and injected as notifications on later turns.
 BACKGROUND_JOB_TIMEOUT: int = int(os.getenv("BACKGROUND_JOB_TIMEOUT", "600"))
 BACKGROUND_MAX_OUTPUT_CHARS: int = int(os.getenv("BACKGROUND_MAX_OUTPUT_CHARS", "200000"))
+
+# ── Cron scheduler (Lesson 12) ───────────────────────────────────
+# Durable job definitions (durable=True) persist to a single JSON file, written
+# atomically. In-memory jobs (durable=False) vanish on restart.
+SCHEDULES_FILE: str = os.getenv("SCHEDULES_FILE", ".scheduled_tasks.json")

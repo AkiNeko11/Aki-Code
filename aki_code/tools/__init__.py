@@ -13,10 +13,14 @@ from aki_code.tools.task_list import ListTasksTool
 from aki_code.tools.task_update import UpdateTaskTool
 from aki_code.tools.task_claim import ClaimTaskTool
 from aki_code.tools.task_complete import CompleteTaskTool
+from aki_code.tools.schedule_cron import ScheduleCronTool
+from aki_code.tools.list_crons import ListCronsTool
+from aki_code.tools.cancel_cron import CancelCronTool
 from aki_code.tools.task import TaskTool
 from aki_code.todo.manager import TodoManager
 from aki_code.skills.loader import SkillLoader
 from aki_code.tasks.store import TaskStore
+from aki_code.scheduler.scheduler import CronScheduler
 
 
 def create_registry(
@@ -27,6 +31,7 @@ def create_registry(
     todo_manager: TodoManager,
     skill_loader: SkillLoader,
     task_store: TaskStore,
+    scheduler: CronScheduler,
     ask_permission,
     console,
 ) -> ToolRegistry:
@@ -45,6 +50,9 @@ def create_registry(
     reg.register(UpdateTaskTool(task_store))
     reg.register(ClaimTaskTool(task_store))
     reg.register(CompleteTaskTool(task_store))
+    reg.register(ScheduleCronTool(scheduler))
+    reg.register(ListCronsTool(scheduler))
+    reg.register(CancelCronTool(scheduler))
     reg.register(TaskTool(
         client=client,
         registry=reg,

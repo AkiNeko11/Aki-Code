@@ -19,6 +19,7 @@ from aki_code.todo.manager import TodoManager
 from aki_code.compact import Compactor, is_prompt_too_long
 from aki_code.memory import MemoryStore
 from aki_code.tasks import TaskStore
+from aki_code.scheduler import CronScheduler
 from aki_code.background import (
     BackgroundManager,
     inject_background_results,
@@ -101,6 +102,13 @@ def run() -> None:
     memory_store = MemoryStore(client, memory_dir=config.MEMORY_DIR)
     task_store = TaskStore(config.TASKS_DIR)
     background_manager = BackgroundManager()
+    scheduler = CronScheduler(config.SCHEDULES_FILE)
+    try:
+        scheduler.load()
+    except ValueError as exc:
+        # Report a corrupt schedule file loudly rather than silently starting
+        # with no jobs (the course requires the error to surface).
+        console.print(f"[bold red]Schedule load error:[/bold red] {exc}")
     system_prompt = build_system_prompt(skill_catalog)
     registry = create_registry(
         client=client,
@@ -109,6 +117,7 @@ def run() -> None:
         todo_manager=todo_manager,
         skill_loader=skill_loader,
         task_store=task_store,
+        scheduler=scheduler,
         ask_permission=_request_permission,
         console=console,
     )

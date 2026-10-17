@@ -23,6 +23,8 @@ from aki_code.team.protocol import (
     new_request_id,
 )
 from aki_code.team.teammate import TeammateRuntime, spawn_teammate
+from aki_code.team.assignments import Assignments
+from aki_code.team.worktree import WorktreeError, remove_worktree
 
 LEAD = "lead"
 
@@ -48,6 +50,7 @@ class TeamManager:
         hook_manager,
         console=None,
         workdir: str | None = None,
+        assignments: Assignments | None = None,
     ):
         self.bus = bus
         self.task_store = task_store
@@ -57,6 +60,7 @@ class TeamManager:
         self.hook_manager = hook_manager
         self.console = console
         self.workdir = workdir or os.getcwd()
+        self.assignments = assignments or Assignments()
         self.teammates: dict[str, TeammateRuntime] = {}
         self.pending: dict[str, ProtocolState] = {}
         self._lock = threading.RLock()
@@ -79,6 +83,7 @@ class TeamManager:
                     hook_manager=self.hook_manager,
                     console=self.console,
                     workdir=self.workdir,
+                    assignments=self.assignments,
                     require_plan=require_plan,
                 )
             except ValueError as exc:
@@ -208,3 +213,34 @@ class TeamManager:
             self.teammates.clear()
         for runtime in runtimes:
             runtime.stop(timeout=timeout)
+
+    # ── worktree host operations (not model tools) ──────────────
+
+    def remove_worktree(self, name: str, discard_changes: bool = False) -> str:
+        """Host-only worktree cleanup; the model can create but never remove.
+
+        The caller is expected to have obtained explicit user confirmation for a
+        destructive removal. Refuses pending/in_progress bindings and leases still
+        in use this turn; without discard_changes any tracked/untracked/ignored
+        file blocks it. The wt/<name> branch is always preserved.
+        """
+        try:
+            return remove_worktree(
+                name,
+                task_store=self.task_store,
+                base_repo=self.workdir,
+                assignments=self.assignments,
+                discard_changes=discard_changes,
+            )
+        except (WorktreeError, ValueError, KeyError) as exc:
+            return f"Error: {exc}"
+
+    def recover_assignments(self) -> list:
+        """Rebuild in-progress leases from durable task bindings after a restart.
+
+        Surfaces a broken binding as an error rather than silently falling back to
+        the repository directory, so a lost checkout is not papered over.
+        """
+        return self.assignments.recover(
+            task_store=self.task_store, base_repo=self.workdir
+        )

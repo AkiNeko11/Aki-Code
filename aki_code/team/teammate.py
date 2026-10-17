@@ -22,6 +22,7 @@ from aki_code.team.bus import (
 )
 from aki_code.team.protocol import new_request_id
 from aki_code.team.roles import TEAMMATE_EXCLUDED_TOOLS, teammate_schemas
+from aki_code.team.assignments import Assignments
 from aki_code.team.worktree import WorktreeError, resolve_task_cwd
 
 # Plan gate: mutating tools are blocked unless the plan is not required or has
@@ -65,6 +66,7 @@ class TeammateRuntime:
         system_prompt: str | None = None,
         console=None,
         workdir: str | None = None,
+        assignments: Assignments | None = None,
         require_plan: bool = False,
         max_turns: int = DEFAULT_MAX_TURNS,
         idle_scan_interval: float = DEFAULT_IDLE_SCAN_INTERVAL,
@@ -78,6 +80,7 @@ class TeammateRuntime:
         self.system_prompt = system_prompt or build_teammate_prompt(name)
         self.console = console
         self.workdir = workdir or os.getcwd()
+        self.assignments = assignments or Assignments()
         self.max_turns = max_turns
         self.idle_scan_interval = idle_scan_interval
 
@@ -128,6 +131,7 @@ class TeammateRuntime:
                 self._report(self.current_task, result)
                 self.current_task = None
                 self.cwd = self.workdir  # release the assignment on going IDLE
+                self.assignments.release(self.name)
             elif self._pending_directive:
                 self._agent_loop()
                 self._pending_directive = False
@@ -153,9 +157,11 @@ class TeammateRuntime:
                     )
 
     def _begin_task(self, task) -> None:
-        # Resolve the working directory first so a broken binding raises before
-        # any state is mutated.
-        cwd = self._resolve_cwd(task)
+        # Resolve and lease the working directory first so a broken binding
+        # raises before any state is mutated. assign() records the lease the host
+        # checks before removing a worktree, and resolves an unbound task to the
+        # repository directory.
+        cwd = self.assignments.assign(self.name, task, self.workdir)
         self.current_task = task
         self.cwd = cwd
         # Claiming changes task identity, so any prior plan approval is stale.
@@ -167,12 +173,6 @@ class TeammateRuntime:
                 f"[Auto-claimed task {task.id}] {task.subject}\n\n{task.description}"
             ),
         })
-
-    def _resolve_cwd(self, task) -> str:
-        # A task bound to a worktree runs there; an unbound task runs in the
-        # repository directory. A missing/invalid binding raises rather than
-        # silently falling back to the repo (the caller reports it).
-        return resolve_task_cwd(task, self.workdir)
 
     # ── WORK loop ───────────────────────────────────────────────
 
@@ -342,6 +342,7 @@ def spawn_teammate(
     hook_manager,
     console=None,
     workdir: str | None = None,
+    assignments: Assignments | None = None,
     require_plan: bool = False,
     max_turns: int = DEFAULT_MAX_TURNS,
     idle_scan_interval: float = DEFAULT_IDLE_SCAN_INTERVAL,
@@ -372,6 +373,7 @@ def spawn_teammate(
         hook_manager=hook_manager,
         console=console,
         workdir=workdir,
+        assignments=assignments,
         require_plan=require_plan,
         max_turns=max_turns,
         idle_scan_interval=idle_scan_interval,

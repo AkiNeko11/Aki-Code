@@ -16,6 +16,8 @@ TEAMMATE_EXCLUDED_TOOLS = frozenset({
     "create_task",      # task-graph editing is Lead-only
     "update_task",      # task-graph editing is Lead-only
     "spawn_teammate",   # team control is Lead-only
+    "list_teammates",   # team control is Lead-only
+    "shutdown_teammate",  # team control is Lead-only
     "create_worktree",  # team control is Lead-only
     "request_plan",     # Lead-side plan protocol
     "approve_plan",     # Lead-side plan protocol

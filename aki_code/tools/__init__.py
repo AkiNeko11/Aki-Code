@@ -16,11 +16,20 @@ from aki_code.tools.task_complete import CompleteTaskTool
 from aki_code.tools.schedule_cron import ScheduleCronTool
 from aki_code.tools.list_crons import ListCronsTool
 from aki_code.tools.cancel_cron import CancelCronTool
+from aki_code.tools.team import (
+    ApprovePlanTool,
+    ListTeammatesTool,
+    RequestPlanTool,
+    ShutdownTeammateTool,
+    SpawnTeammateTool,
+    SubmitPlanTool,
+)
 from aki_code.tools.task import TaskTool
 from aki_code.todo.manager import TodoManager
 from aki_code.skills.loader import SkillLoader
 from aki_code.tasks.store import TaskStore
 from aki_code.scheduler.scheduler import CronScheduler
+from aki_code.team.manager import TeamManager
 
 
 def create_registry(
@@ -32,6 +41,7 @@ def create_registry(
     skill_loader: SkillLoader,
     task_store: TaskStore,
     scheduler: CronScheduler,
+    team_manager: TeamManager,
     ask_permission,
     console,
 ) -> ToolRegistry:
@@ -53,6 +63,12 @@ def create_registry(
     reg.register(ScheduleCronTool(scheduler))
     reg.register(ListCronsTool(scheduler))
     reg.register(CancelCronTool(scheduler))
+    reg.register(SpawnTeammateTool(team_manager))
+    reg.register(ListTeammatesTool(team_manager))
+    reg.register(RequestPlanTool(team_manager))
+    reg.register(ApprovePlanTool(team_manager))
+    reg.register(ShutdownTeammateTool(team_manager))
+    reg.register(SubmitPlanTool())
     reg.register(TaskTool(
         client=client,
         registry=reg,

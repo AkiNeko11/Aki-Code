@@ -80,6 +80,12 @@ SAFE_TOOLS_AUTO = {
     "schedule_cron",
     "list_crons",
     "cancel_cron",
+    "spawn_teammate",
+    "list_teammates",
+    "request_plan",
+    "approve_plan",
+    "shutdown_teammate",
+    "submit_plan",
 }
 
 

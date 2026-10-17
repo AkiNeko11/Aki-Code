@@ -12,6 +12,7 @@ from aki_code.llm.client import call_with_retry
 from aki_code.llm.prompts import build_teammate_prompt
 from aki_code.team.bus import (
     MSG_IDLE,
+    MSG_PLAN_APPROVAL_REQUEST,
     MSG_PLAN_APPROVAL_RESPONSE,
     MSG_PLAN_REQUEST,
     MSG_RESULT,
@@ -19,6 +20,7 @@ from aki_code.team.bus import (
     MSG_SHUTDOWN_RESPONSE,
     MessageBus,
 )
+from aki_code.team.protocol import new_request_id
 from aki_code.team.roles import TEAMMATE_EXCLUDED_TOOLS, teammate_schemas
 
 # Plan gate: mutating tools are blocked unless the plan is not required or has
@@ -30,6 +32,7 @@ WORKSPACE_TOOLS = frozenset({"bash", "read_file", "write_file", "edit_file", "gl
 
 GATE_NOT_REQUIRED = "not_required"
 GATE_REQUIRED = "required"
+GATE_PENDING = "pending"
 GATE_APPROVED = "approved"
 GATE_REJECTED = "rejected"
 
@@ -177,6 +180,8 @@ class TeammateRuntime:
 
     def _run_tool(self, tool_use) -> str:
         name = tool_use.name
+        if name == "submit_plan":
+            return self._submit_plan(str(tool_use.input.get("plan", "")))
         if name in TEAMMATE_EXCLUDED_TOOLS:
             return f"Tool '{name}' is not available to teammates."
         if name in PLAN_GATED_TOOLS and self.gate_status not in (
@@ -226,6 +231,31 @@ class TeammateRuntime:
             {"task_id": task.id},
         )
 
+    # ── plan submission (teammate side) ─────────────────────────
+
+    def _submit_plan(self, plan: str) -> str:
+        """Send the plan to the lead for approval and pend the gate.
+
+        The approval only takes effect if it comes back for the same task and
+        work version, so claiming or releasing a task invalidates a stale plan.
+        """
+        if not plan.strip():
+            return "Cannot submit an empty plan."
+        request_id = new_request_id("plan")
+        self.gate_status = GATE_PENDING
+        self.bus.send(
+            self.name, "lead", plan.strip(), MSG_PLAN_APPROVAL_REQUEST,
+            {
+                "request_id": request_id,
+                "work_version": self.work_version,
+                "task_id": self.gate_task_id,
+            },
+        )
+        return (
+            f"Plan submitted for approval (request_id={request_id}). Shell and "
+            f"file-editing tools stay blocked until the lead approves."
+        )
+
     # ── IDLE message handling ───────────────────────────────────
 
     def _handle_messages(self, inbox: list[dict]) -> bool:
@@ -241,11 +271,25 @@ class TeammateRuntime:
                 self._stop.set()
                 return True
             if msg_type == MSG_PLAN_APPROVAL_RESPONSE:
-                # Phase D validates work_version/task_id before honoring this.
-                self.gate_status = GATE_APPROVED if metadata.get("approve") else GATE_REJECTED
+                # Honor only if it matches the task/work version the plan was
+                # submitted for; claiming or releasing a task stale-ifies it.
+                resp_version = metadata.get("work_version")
+                resp_task = metadata.get("task_id")
+                version_ok = resp_version is None or resp_version == self.work_version
+                task_ok = resp_task is None or resp_task == self.gate_task_id
+                if version_ok and task_ok:
+                    self.gate_status = (
+                        GATE_APPROVED if metadata.get("approve") else GATE_REJECTED
+                    )
                 continue
             if msg_type == MSG_PLAN_REQUEST:
-                # Phase D submits a plan in response; nothing to do yet.
+                # The lead asked for a plan; nudge the model to produce one on
+                # the next WORK turn (submit_plan is the model's tool).
+                self.messages.append({
+                    "role": "user",
+                    "content": "[Message from lead] Please submit your plan for approval.",
+                })
+                self._pending_directive = True
                 continue
             # A free-text directive from the lead: take it into context and work
             # a turn to respond (workspace tools stay gated without a task).

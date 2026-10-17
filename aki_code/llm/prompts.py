@@ -63,6 +63,17 @@ Always use tools when you need to interact with the codebase. Don't guess file c
 def build_system_prompt(skill_catalog: str = "", memory_text: str = "") -> str:
     env = _detect_environment()
     prompt = f"{_BASE_PROMPT}\n\n# Environment\n{env}"
+    prompt += (
+        "\n\n# Leading a team\n"
+        "You can run work in parallel by spawning teammates on tasks from the "
+        "shared task board. When parallel work would help, FIRST propose a small "
+        "team with clear responsibilities and WAIT for the user's confirmation. "
+        "Do not call spawn_teammate before the user confirms. Build the task "
+        "graph first (create_task for every node, then update_task to add "
+        "blockedBy edges), then spawn teammates onto ready tasks. Teammate "
+        "results, idle notifications, and plan-approval requests arrive as "
+        "[Team events] — react to them; do not poll list_teammates in a loop."
+    )
     if memory_text:
         prompt += (
             "\n\n# Recalled memory\n"

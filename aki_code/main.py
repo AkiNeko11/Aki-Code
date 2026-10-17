@@ -1,5 +1,7 @@
 import signal
 import threading
+import queue
+import time
 
 from rich.console import Console
 from rich.markup import escape
@@ -21,6 +23,7 @@ from aki_code.compact import Compactor, is_prompt_too_long
 from aki_code.memory import MemoryStore
 from aki_code.tasks import TaskStore
 from aki_code.scheduler import CronScheduler
+from aki_code.team import MessageBus, TeamManager
 from aki_code.background import (
     BackgroundManager,
     inject_background_results,
@@ -29,9 +32,15 @@ from aki_code.background import (
 
 console = Console()
 
+# Sentinel distinguishing "no input available right now" from a real EOF (None)
+# when polling the input queue in the dual-wait loop.
+_NO_INPUT = object()
+
 
 def _request_permission(tool_name: str, tool_input: dict, reason: str) -> bool:
-    console.print(f"  [yellow]⚠ {reason}[/yellow]")
+    # ASCII marker: rich's legacy Windows console renders via the GBK codec,
+    # which cannot encode symbols like U+26A0 and would raise mid-prompt.
+    console.print(f"  [yellow]! {reason}[/yellow]")
     console.print(f"  [dim]{escape(f'{tool_name}({tool_input})')}[/dim]")
     answer = console.input("  [yellow]Allow? (y/n): [/yellow]").strip().lower()
     return answer.startswith("y")
@@ -120,6 +129,19 @@ def run() -> None:
         # Report a corrupt schedule file loudly rather than silently starting
         # with no jobs (the course requires the error to surface).
         console.print(f"[bold red]Schedule load error:[/bold red] {exc}")
+    bus = MessageBus(config.MAILBOX_DIR)
+    # TeamManager needs the registry (teammates run tools through it) and the
+    # registry needs TeamManager (Lead tools), so build it registry-less and
+    # late-bind, the same way TaskTool receives the registry under construction.
+    team_manager = TeamManager(
+        bus=bus,
+        task_store=task_store,
+        client=client,
+        registry=None,
+        permission_manager=permission_manager,
+        hook_manager=hook_manager,
+        console=console,
+    )
     registry = create_registry(
         client=client,
         permission_manager=permission_manager,
@@ -128,9 +150,11 @@ def run() -> None:
         skill_loader=skill_loader,
         task_store=task_store,
         scheduler=scheduler,
+        team_manager=team_manager,
         ask_permission=_request_permission,
         console=console,
     )
+    team_manager.registry = registry
     command_registry = create_command_registry()
     compactor = Compactor(client, todo_manager=todo_manager, console=console)
     messages: list[dict] = []
@@ -146,6 +170,7 @@ def run() -> None:
     # and Ctrl+C is already handled by the KeyboardInterrupt paths below.
     def _terminate(signum, frame):
         stop_event.set()
+        team_manager.shutdown_all(timeout=1.0)
         background_manager.teardown_all()
         raise SystemExit(0)
 
@@ -346,70 +371,133 @@ def run() -> None:
         else:
             messages.append({"role": "user", "content": [block]})
 
-        console.print(f"  [magenta]⏰ {len(fired)} scheduled task(s) firing[/magenta]")
+        console.print(f"  [magenta][cron] {len(fired)} scheduled task(s) firing[/magenta]")
         if run_agent_turn(content, interactive=False):
             scheduler.finalize_delivery(fired)
         else:
             messages[:] = saved
             scheduler.requeue(fired)
 
+    def run_team_turn() -> bool:
+        """Deliver pending lead-inbox events as one interactive Lead turn.
+
+        Returns True if a turn ran. Events are drained from the mailbox and
+        injected as a single [Team events] user message; on a model failure the
+        message stays dangling so the normal retry path offers it again.
+        """
+        events = team_manager.consume_lead_inbox()
+        if not events:
+            return False
+        text = team_manager.format_team_events(events)
+        block = {"type": "text", "text": text}
+        if messages and messages[-1].get("role") == "user":
+            prev = messages[-1].get("content")
+            merged = (
+                prev + [block]
+                if isinstance(prev, list)
+                else [{"type": "text", "text": prev}, block]
+            )
+            messages[-1] = {"role": "user", "content": merged}
+        else:
+            messages.append({"role": "user", "content": [block]})
+        console.print(f"  [magenta][team] {len(events)} team event(s)[/magenta]")
+        run_agent_turn(text, interactive=True)
+        return True
+
     # Start the cron runtime only for the live CLI; importing this module must
     # not spawn threads.
     scheduler.start(agent_lock, run_scheduled_turn)
 
+    # Terminal input runs on its own thread so the loop can also wake on team
+    # events without the user pressing enter. A gate keeps exactly one prompt
+    # outstanding, so the reader never reads ahead or stacks prompts.
+    input_queue: "queue.Queue" = queue.Queue()
+    want_input = threading.Event()
+
+    def _input_reader() -> None:
+        while not stop_event.is_set():
+            want_input.wait()
+            if stop_event.is_set():
+                break
+            want_input.clear()
+            input_queue.put(_read_input())  # None signals EOF / exit
+
+    reader = threading.Thread(target=_input_reader, name="input-reader", daemon=True)
+    reader.start()
+    want_input.set()  # allow the first prompt
+
+    POLL_SECONDS = 0.1
     while True:
-        # A dangling user message means the previous turn failed after retries.
-        # This lock-free peek only drives the hint; the authoritative recheck
-        # happens under agent_lock below (a scheduled turn may change the tail).
-        if bool(messages) and messages[-1]["role"] == "user":
-            console.print(
-                "[dim]Last request failed. Press Enter to retry, "
-                "or type a new message.[/dim]"
-            )
+        # 1) User input has priority over team events.
+        try:
+            user_input = input_queue.get_nowait()
+        except queue.Empty:
+            user_input = _NO_INPUT
 
-        user_input = _read_input()
-        if user_input is None:
-            console.print("\n[dim]Bye![/dim]")
-            break
+        if user_input is not _NO_INPUT:
+            if user_input is None:
+                console.print("\n[dim]Bye![/dim]")
+                break
 
-        with agent_lock:
-            # Slash commands are intercepted before anything touches the convo.
-            if user_input.startswith("/"):
-                ctx = CommandContext(
-                    console=console,
-                    messages=messages,
-                    token_tracker=token_tracker,
-                    commands=command_registry,
-                    settings=settings,
-                    permission_manager=permission_manager,
-                    todo_manager=todo_manager,
-                    skill_loader=skill_loader,
-                    compactor=compactor,
-                    memory_store=memory_store,
-                    task_store=task_store,
+            exit_requested = False
+            with agent_lock:
+                # Slash commands are intercepted before anything touches the convo.
+                if user_input.startswith("/"):
+                    ctx = CommandContext(
+                        console=console,
+                        messages=messages,
+                        token_tracker=token_tracker,
+                        commands=command_registry,
+                        settings=settings,
+                        permission_manager=permission_manager,
+                        todo_manager=todo_manager,
+                        skill_loader=skill_loader,
+                        compactor=compactor,
+                        memory_store=memory_store,
+                        task_store=task_store,
+                    )
+                    if command_registry.dispatch(user_input, ctx).action == CommandAction.EXIT:
+                        exit_requested = True
+                else:
+                    retrying = bool(messages) and messages[-1]["role"] == "user"
+                    if retrying:
+                        if user_input:
+                            messages[-1] = {"role": "user", "content": user_input}
+                            active_request = user_input
+                        else:
+                            prev = messages[-1].get("content")
+                            active_request = prev if isinstance(prev, str) else ""
+                        run_agent_turn(active_request, interactive=True)
+                    elif user_input:
+                        hook_manager.fire(HookEvent.ON_USER_INPUT, user_input=user_input)
+                        messages.append({"role": "user", "content": user_input})
+                        run_agent_turn(user_input, interactive=True)
+            if exit_requested:
+                break
+
+            # Re-arm the reader: show the retry hint (if any) then the prompt.
+            if bool(messages) and messages[-1]["role"] == "user":
+                console.print(
+                    "[dim]Last request failed. Press Enter to retry, "
+                    "or type a new message.[/dim]"
                 )
-                if command_registry.dispatch(user_input, ctx).action == CommandAction.EXIT:
-                    break
+            want_input.set()
+            continue
+
+        # 2) No input pending: deliver team events, waking a Lead turn without
+        #    the user having to type anything.
+        if team_manager.has_lead_mail():
+            with agent_lock:
+                ran = run_team_turn()
+            if ran:
                 continue
 
-            retrying = bool(messages) and messages[-1]["role"] == "user"
-            if retrying:
-                if user_input:
-                    messages[-1] = {"role": "user", "content": user_input}
-                    active_request = user_input
-                else:
-                    prev = messages[-1].get("content")
-                    active_request = prev if isinstance(prev, str) else ""
-            else:
-                if not user_input:
-                    continue
-                hook_manager.fire(HookEvent.ON_USER_INPUT, user_input=user_input)
-                messages.append({"role": "user", "content": user_input})
-                active_request = user_input
-
-            run_agent_turn(active_request, interactive=True)
+        # 3) Idle: briefly wait, then re-check both sources.
+        time.sleep(POLL_SECONDS)
 
     stop_event.set()
+    want_input.set()  # release the reader if it is parked on the gate
+    team_manager.shutdown_all()
     scheduler.stop()
     background_manager.teardown_all()
     registry.teardown_all()

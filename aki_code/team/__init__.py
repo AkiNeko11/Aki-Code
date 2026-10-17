@@ -9,6 +9,7 @@ from aki_code.team.bus import (
     MSG_SHUTDOWN_RESPONSE,
     MessageBus,
 )
+from aki_code.team.roles import TEAMMATE_EXCLUDED_TOOLS, teammate_schemas
 
 __all__ = [
     "MessageBus",
@@ -20,4 +21,6 @@ __all__ = [
     "MSG_PLAN_REQUEST",
     "MSG_PLAN_APPROVAL_REQUEST",
     "MSG_PLAN_APPROVAL_RESPONSE",
+    "TEAMMATE_EXCLUDED_TOOLS",
+    "teammate_schemas",
 ]

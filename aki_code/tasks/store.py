@@ -4,6 +4,8 @@ import json
 import os
 import re
 import secrets
+import threading
+from contextlib import contextmanager
 from pathlib import Path
 
 from aki_code import config
@@ -21,10 +23,23 @@ class TaskStore:
     exclusive write (regenerating on the rare collision); save() writes
     atomically via a temp file + rename so a crash never leaves a half-written
     task. This is the durable counterpart to the in-session TodoWrite checklist.
+
+    Lesson 13 adds concurrency: several teammates may scan and claim at once, so
+    discovery + ownership change happen under task_store_lock() and only one
+    claimant wins a given task. The lock is in-process for now; a cross-process
+    file lock (so another Harness sharing the directory cannot win the same
+    claim) is deferred to the worktree phase.
     """
 
     def __init__(self, tasks_dir: str | Path = config.TASKS_DIR):
         self.tasks_dir = Path(tasks_dir)
+        self._lock = threading.RLock()
+
+    @contextmanager
+    def task_store_lock(self):
+        """Serialize read-modify-write task operations across threads."""
+        with self._lock:
+            yield
 
     # ── ids and paths ───────────────────────────────────────────
 
@@ -111,31 +126,32 @@ class TaskStore:
             addBlockedBy = [addBlockedBy]
         deps = [str(x) for x in (addBlockedBy or [])]
 
-        task = self.load(task_id)  # target must exist
-        for dep_id in deps:
-            if not self.exists(dep_id):
-                raise KeyError(f"unknown dependency '{dep_id}'")
-        if task.status != PENDING:
-            raise ValueError(
-                f"task {task_id} is {task.status}; dependencies can only be "
-                f"added while pending"
-            )
-        if task.owner is not None:
-            raise ValueError(f"task {task_id} is already claimed by {task.owner}")
-        if task_id in deps:
-            raise ValueError(f"task {task_id} cannot depend on itself")
-        if self._creates_cycle(task_id, deps):
-            raise ValueError(
-                f"adding {deps} to {task_id} would create a dependency cycle"
-            )
+        with self.task_store_lock():
+            task = self.load(task_id)  # target must exist
+            for dep_id in deps:
+                if not self.exists(dep_id):
+                    raise KeyError(f"unknown dependency '{dep_id}'")
+            if task.status != PENDING:
+                raise ValueError(
+                    f"task {task_id} is {task.status}; dependencies can only be "
+                    f"added while pending"
+                )
+            if task.owner is not None:
+                raise ValueError(f"task {task_id} is already claimed by {task.owner}")
+            if task_id in deps:
+                raise ValueError(f"task {task_id} cannot depend on itself")
+            if self._creates_cycle(task_id, deps):
+                raise ValueError(
+                    f"adding {deps} to {task_id} would create a dependency cycle"
+                )
 
-        merged = list(task.blockedBy)
-        for dep_id in deps:
-            if dep_id not in merged:
-                merged.append(dep_id)
-        task.blockedBy = merged
-        self.save(task)
-        return task
+            merged = list(task.blockedBy)
+            for dep_id in deps:
+                if dep_id not in merged:
+                    merged.append(dep_id)
+            task.blockedBy = merged
+            self.save(task)
+            return task
 
     def _creates_cycle(self, task_id: str, new_deps: list[str]) -> bool:
         """True if making `task_id` depend on `new_deps` closes a loop.
@@ -179,43 +195,92 @@ class TaskStore:
 
     # ── Lifecycle ───────────────────────────────────────────────
 
-    def claim(self, task_id: str, owner: str = "agent") -> str:
-        """pending -> in_progress, setting the owner; a message either way."""
-        task = self.load(task_id)
+    def _owner_in_progress(self, owner: str) -> bool:
+        """True if `owner` already holds an in_progress task (one at a time)."""
+        return any(
+            t.owner == owner and t.status == IN_PROGRESS for t in self.list()
+        )
+
+    def _validate_claim(self, task: Task, owner: str) -> str | None:
+        """Return why `owner` cannot claim `task`, or None if it can."""
         if task.status != PENDING:
-            return f"Task {task_id} is {task.status}, cannot claim"
+            return f"Task {task.id} is {task.status}, cannot claim"
+        if task.owner is not None:
+            return f"Task {task.id} is already claimed by {task.owner}"
+        if self._owner_in_progress(owner):
+            return f"Owner {owner} must complete its current task first"
         dependencies = self.incomplete_dependencies(task)
         if dependencies:
             return f"Blocked by: {', '.join(dependencies)}"
-        task.owner = owner
-        task.status = IN_PROGRESS
-        self.save(task)
-        return f"Claimed {task_id} ({task.subject})"
+        return None
+
+    def claim(self, task_id: str, owner: str = "agent") -> str:
+        """pending -> in_progress, setting the owner; a message either way."""
+        with self.task_store_lock():
+            task = self.load(task_id)
+            error = self._validate_claim(task, owner)
+            if error:
+                return error
+            task.owner = owner
+            task.status = IN_PROGRESS
+            self.save(task)
+            return f"Claimed {task_id} ({task.subject})"
+
+    def scan_unclaimed_tasks(self) -> list[Task]:
+        """Snapshot of tasks that are pending, unowned, and unblocked.
+
+        Only a point-in-time candidate list: another teammate (or process) may
+        be eyeing the same task, so the actual ownership change must happen
+        inside claim_task / claim_next_task under the lock.
+        """
+        with self.task_store_lock():
+            return [
+                t
+                for t in self.list()
+                if t.status == PENDING and t.owner is None and self.can_start(t.id)
+            ]
+
+    def claim_next_task(self, owner: str) -> Task | None:
+        """Atomically claim the first available task for `owner`; None if none.
+
+        Discovery and the ownership change happen under one lock hold, so two
+        teammates racing for the same candidate cannot both win it.
+        """
+        with self.task_store_lock():
+            for task in self.scan_unclaimed_tasks():
+                if self._validate_claim(task, owner) is not None:
+                    continue
+                task.owner = owner
+                task.status = IN_PROGRESS
+                self.save(task)
+                return task
+            return None
 
     def complete(self, task_id: str, owner: str = "agent") -> str:
         """in_progress -> completed; report downstream tasks this unblocked."""
-        task = self.load(task_id)
-        if task.status != IN_PROGRESS:
-            return f"Task {task_id} is {task.status}, cannot complete"
-        if task.owner != owner:
-            return f"Task {task_id} is owned by {task.owner}, not {owner}"
+        with self.task_store_lock():
+            task = self.load(task_id)
+            if task.status != IN_PROGRESS:
+                return f"Task {task_id} is {task.status}, cannot complete"
+            if task.owner != owner:
+                return f"Task {task_id} is owned by {task.owner}, not {owner}"
 
-        ready_before = {
-            t.id
-            for t in self.list()
-            if t.status == PENDING and t.blockedBy and self.can_start(t.id)
-        }
-        task.status = COMPLETED
-        self.save(task)
-        unblocked = [
-            t.subject
-            for t in self.list()
-            if t.status == PENDING
-            and t.blockedBy
-            and t.id not in ready_before
-            and self.can_start(t.id)
-        ]
-        message = f"Completed {task_id} ({task.subject})"
-        if unblocked:
-            message += f"\nUnblocked: {', '.join(unblocked)}"
-        return message
+            ready_before = {
+                t.id
+                for t in self.list()
+                if t.status == PENDING and t.blockedBy and self.can_start(t.id)
+            }
+            task.status = COMPLETED
+            self.save(task)
+            unblocked = [
+                t.subject
+                for t in self.list()
+                if t.status == PENDING
+                and t.blockedBy
+                and t.id not in ready_before
+                and self.can_start(t.id)
+            ]
+            message = f"Completed {task_id} ({task.subject})"
+            if unblocked:
+                message += f"\nUnblocked: {', '.join(unblocked)}"
+            return message

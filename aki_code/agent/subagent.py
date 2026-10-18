@@ -27,6 +27,15 @@ EXCLUDED_TOOLS = (
     "list_crons",
     "cancel_cron",
     "connect_mcp",
+    "workflow",
+    "spawn_teammate",
+    "list_teammates",
+    "send_message",
+    "request_plan",
+    "review_plan",
+    "request_shutdown",
+    "submit_plan",
+    "create_worktree",
 )
 
 

@@ -1,4 +1,5 @@
 from aki_code.commands.registry import CommandRegistry
+from aki_code.commands.workflow import WorkflowsCommand
 from aki_code.commands.builtin import (
     CompactCommand,
     ExitCommand,
@@ -26,6 +27,7 @@ def create_command_registry() -> CommandRegistry:
     reg.register(TasksCommand())
     reg.register(SkillCommand())
     reg.register(McpCommand())
+    reg.register(WorkflowsCommand())
     reg.register(MemoryCommand())
     reg.register(CompactCommand())
     reg.register(ExitCommand())

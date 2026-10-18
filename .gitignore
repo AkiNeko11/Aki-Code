@@ -12,3 +12,4 @@ build/
 .scheduled_tasks.json
 .mailboxes/
 .worktrees/
+.workflows/

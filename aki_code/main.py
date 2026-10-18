@@ -2,6 +2,7 @@ import signal
 import threading
 import queue
 import time
+from pathlib import Path
 
 from rich.console import Console
 from rich.markup import escape
@@ -177,6 +178,42 @@ def run() -> None:
         console=console,
         mcp_manager=mcp_manager,
     )
+    # Workflow steps use fresh harnesses and a restricted repository tool set.
+    # The outer call waits synchronously; the runtime bounds internal parallelism.
+    from aki_code.workflow.examples import register_builtin_workflows
+    from aki_code.workflow.model import RunLimits
+    from aki_code.workflow.registry import WorkflowRegistry
+    from aki_code.workflow.runner import HarnessAgentRunner
+    from aki_code.workflow.runtime import WorkflowRuntime
+    from aki_code.workflow.store import WorkflowStore
+
+    workflows = WorkflowRegistry()
+    register_builtin_workflows(workflows)
+
+    def _workflow_event(event):
+        kind = event.get("progress_type", event.get("type", "progress"))
+        detail = (event.get("label") or event.get("phase") or event.get("message")
+                  or event.get("status") or event.get("name") or "")
+        # Intermediate agent conversations stay out of the lead's context;
+        # the outer call returns the final result and execution status.
+        console.print(f"  [dim]workflow {escape(str(kind))}: {escape(str(detail)[:250])}[/dim]")
+
+    workflow_runtime = WorkflowRuntime(
+        workflows,
+        HarnessAgentRunner(
+            client=client, permission_manager=permission_manager,
+            hook_manager=hook_manager, workspace=Path.cwd(), allow_reads=True,
+        ),
+        WorkflowStore(config.WORKFLOWS_DIR),
+        limits=RunLimits(
+            max_concurrency=config.WORKFLOW_MAX_CONCURRENCY,
+            max_calls=config.WORKFLOW_MAX_CALLS,
+            max_turns=config.WORKFLOW_MAX_TURNS,
+            max_tokens=config.WORKFLOW_MAX_TOKENS,
+            request_timeout=config.WORKFLOW_REQUEST_TIMEOUT,
+        ),
+        event_sink=_workflow_event,
+    )
     registry = create_registry(
         client=client,
         permission_manager=permission_manager,
@@ -189,6 +226,7 @@ def run() -> None:
         mcp_manager=mcp_manager,
         ask_permission=_request_permission,
         console=console,
+        workflow_runtime=workflow_runtime,
     )
     command_registry = create_command_registry()
     compactor = Compactor(client, todo_manager=todo_manager, console=console)
@@ -205,6 +243,7 @@ def run() -> None:
     # and Ctrl+C is already handled by the KeyboardInterrupt paths below.
     def _terminate(signum, frame):
         stop_event.set()
+        workflow_runtime.cancel()
         team_manager.shutdown_all(timeout=1.0)
         background_manager.teardown_all()
         raise SystemExit(0)
@@ -391,6 +430,7 @@ def run() -> None:
                         memory_store=memory_store,
                         task_store=task_store,
                         mcp_manager=mcp_manager,
+                        workflow_runtime=workflow_runtime,
                     )
                     if command_registry.dispatch(user_input, ctx).action == CommandAction.EXIT:
                         exit_requested = True
@@ -432,6 +472,7 @@ def run() -> None:
         time.sleep(POLL_SECONDS)
 
     stop_event.set()
+    workflow_runtime.cancel()
     want_input.set()  # release the reader if it is parked on the gate
     team_manager.shutdown_all()
     scheduler.stop()

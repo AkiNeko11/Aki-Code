@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from aki_code.skills.loader import SkillLoader
     from aki_code.tasks.store import TaskStore
     from aki_code.todo.manager import TodoManager
+    from aki_code.workflow.runtime import WorkflowRuntime
 
 
 class CommandAction(Enum):
@@ -44,6 +45,7 @@ class CommandContext:
     memory_store: "MemoryStore"
     task_store: "TaskStore"
     mcp_manager: "MCPManager"
+    workflow_runtime: "WorkflowRuntime | None" = None
 
 
 class BaseCommand(ABC):

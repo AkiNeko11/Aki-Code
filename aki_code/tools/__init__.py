@@ -54,6 +54,7 @@ def create_registry(
     mcp_manager: MCPManager,
     ask_permission,
     console,
+    workflow_runtime=None,
 ) -> ToolRegistry:
     reg = ToolRegistry()
     reg.register(BashTool())
@@ -87,6 +88,10 @@ def create_registry(
     from aki_code.mcp.tools import ConnectMcpTool
 
     reg.register(ConnectMcpTool(registry=reg, manager=mcp_manager))
+    if workflow_runtime is not None:
+        from aki_code.tools.workflow import WorkflowTool
+
+        reg.register(WorkflowTool(workflow_runtime, workflow_runtime.registry))
     reg.register(TaskTool(
         client=client,
         registry=reg,

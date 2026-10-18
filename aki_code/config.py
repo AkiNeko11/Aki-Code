@@ -68,3 +68,11 @@ MAILBOX_DIR: str = os.getenv("MAILBOX_DIR", ".mailboxes")
 # Optional per-task git worktrees so parallel edits do not collide; a task with
 # no worktree runs in the repository working directory.
 WORKTREES_DIR: str = os.getenv("WORKTREES_DIR", ".worktrees")
+
+# Saved, read-only workflows (Lesson 16). Limits apply per run/resume attempt.
+WORKFLOWS_DIR: str = os.getenv("WORKFLOWS_DIR", ".workflows")
+WORKFLOW_MAX_CONCURRENCY: int = int(os.getenv("WORKFLOW_MAX_CONCURRENCY", "3"))
+WORKFLOW_MAX_CALLS: int = int(os.getenv("WORKFLOW_MAX_CALLS", "60"))
+WORKFLOW_MAX_TURNS: int = int(os.getenv("WORKFLOW_MAX_TURNS", "12"))
+WORKFLOW_MAX_TOKENS: int = int(os.getenv("WORKFLOW_MAX_TOKENS", "100000"))
+WORKFLOW_REQUEST_TIMEOUT: float = float(os.getenv("WORKFLOW_REQUEST_TIMEOUT", "120"))

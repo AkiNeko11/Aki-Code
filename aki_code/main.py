@@ -19,12 +19,13 @@ from aki_code.hooks.builtin import register_builtin_hooks
 from aki_code.session import SessionSettings
 from aki_code.skills.loader import SkillLoader
 from aki_code.todo.manager import TodoManager
-from aki_code.compact import Compactor, is_prompt_too_long
+from aki_code.compact import Compactor
 from aki_code.memory import MemoryStore
 from aki_code.tasks import TaskStore
 from aki_code.scheduler import CronScheduler
 from aki_code.team import MessageBus, TeamManager
 from aki_code.mcp.manager import MCPManager
+from aki_code.agent.harness import AgentHarness
 from aki_code.background import (
     BackgroundManager,
     inject_background_results,
@@ -122,6 +123,15 @@ def run() -> None:
     skill_catalog = skill_loader.catalog()
     memory_store = MemoryStore(client, memory_dir=config.MEMORY_DIR)
 
+    # The lead runs on its own HookManager so its permission and turn-end hooks
+    # never leak onto subagents/teammates: those still share `hook_manager`
+    # (observability + token tracking only) and keep their inline permission until
+    # they move to their own harnesses. Both managers feed the same TokenTracker,
+    # so usage still aggregates across the whole session.
+    lead_hooks = HookManager()
+    register_builtin_hooks(lead_hooks, settings)
+    lead_hooks.register(HookEvent.POST_LLM_CALL, token_tracker.on_post_llm_call)
+
     # Turn-end cleanup rides the STOP hook (Lesson 15): when the lead's turn
     # finishes, extract durable memories and consolidate once the store has
     # grown. Best-effort and disk-only — the hook swallows its own errors so a
@@ -138,7 +148,7 @@ def run() -> None:
                 f"  [dim]memory extraction skipped: {escape(str(exc))}[/dim]"
             )
 
-    hook_manager.register(HookEvent.STOP, _memory_stop_hook)
+    lead_hooks.register(HookEvent.STOP, _memory_stop_hook)
 
     task_store = TaskStore(config.TASKS_DIR)
     background_manager = BackgroundManager()
@@ -207,160 +217,63 @@ def run() -> None:
     console.print("[bold green]Aki-Code[/bold green] — coding assistant")
     console.print("[dim]/help for commands, /exit to quit[/dim]\n")
 
-    # Consecutive tool rounds without a todo_write; at 3 we nudge the model.
-    rounds_since_todo = 0
+    # The lead's agent loop, extracted into the shared harness (Lesson 15). The
+    # closures below inject the lead-specific pieces the harness is agnostic to:
+    # streaming model calls, the dynamic registry tool pool, background-job
+    # routing, per-turn memory recall in the system prompt, and compaction.
+    def _lead_dispatch(tool_use):
+        # A long-running bash command flagged run_in_background starts on a worker
+        # thread and returns a placeholder immediately; its result is injected as
+        # a notification on a later turn.
+        if should_run_background(tool_use.name, tool_use.input):
+            bg_id = background_manager.start(tool_use.input.get("command", ""))
+            return f"[Background task {bg_id} started]"
+        return registry.execute(tool_use.name, **tool_use.input)
+
+    def _lead_system_prompt(active_request: str) -> str:
+        # Recall memories relevant to this request and rebuild the system prompt
+        # (skill catalog is static; the memory and MCP sections change per turn).
+        recalled = memory_store.load_memories(
+            memory_store.select_relevant(active_request)
+        )
+        return build_system_prompt(
+            skill_catalog, memory_store.render(recalled), mcp_manager.prompt_state()
+        )
+
+    def _lead_tool_start(tool_use) -> None:
+        console.print(
+            f"  [cyan]→ {tool_use.name}[/cyan]{escape(f'({tool_use.input})')}"
+        )
+
+    harness = AgentHarness(
+        hook_manager=lead_hooks,
+        schema_provider=registry.get_schemas,
+        dispatch=_lead_dispatch,
+        llm_caller=lambda msgs, tools, system: _call_llm(client, msgs, tools, system),
+        permission_manager=permission_manager,
+        system_prompt_provider=_lead_system_prompt,
+        compactor=compactor,
+        pre_model=lambda msgs: inject_background_results(msgs, background_manager),
+        on_tool_start=_lead_tool_start,
+        on_tool_result=_display_tool_result,
+        on_interrupt=lambda: console.print("\n[dim]Interrupted.[/dim]"),
+        on_error=lambda e: console.print(f"\n[bold red]Error:[/bold red] {e}"),
+        todo_nudge=True,
+    )
 
     def run_agent_turn(active_request: str, interactive: bool) -> bool:
-        """Run one full agent turn (model + tool rounds) over the shared messages.
+        """Run one full agent turn over the shared messages via the harness.
 
-        Shared by the main REPL and the cron processor thread; the caller must
+        Shared by the main REPL and the cron/team turn runners; the caller must
         hold agent_lock. Returns True if the turn completed, False if it was
-        interrupted or errored (after rolling back to the pre-call snapshot).
+        interrupted or errored (the harness rolls back to the pre-call snapshot).
         `interactive` picks the permission callback: a scheduled turn runs on
         another thread and cannot prompt on stdin, so it auto-denies anything
         that would need approval.
         """
-        nonlocal rounds_since_todo
         ask = _request_permission if interactive else _deny_permission
+        return harness.run_turn(messages, active_request, ask=ask).ok
 
-        # Recall memories relevant to this request and rebuild the system prompt
-        # (skill catalog is static; only the memory section changes per turn).
-        recalled = memory_store.load_memories(
-            memory_store.select_relevant(active_request)
-        )
-        system_prompt = build_system_prompt(
-            skill_catalog, memory_store.render(recalled), mcp_manager.prompt_state()
-        )
-
-        # active_request is restated in every compaction summary so the model
-        # never loses sight of the goal after history is trimmed.
-        # reactive_retries bounds consecutive reactive compactions this turn, so
-        # a context that cannot be shrunk enough errors out instead of looping.
-        reactive_retries = 0
-
-        while True:
-            # Surface any background jobs that finished since the last turn.
-            inject_background_results(messages, background_manager)
-            # Keep the conversation within budget before every model call.
-            messages[:] = compactor.prepare(messages, active_request)
-            # Snapshot the clean pre-call state so a mid-round failure (e.g. a
-            # tool raising after the assistant turn was appended) rolls back
-            # without leaving a dangling tool_use.
-            snapshot = len(messages)
-
-            try:
-                hook_manager.fire(HookEvent.PRE_LLM_CALL, messages=messages)
-                response = _call_llm(
-                    client, messages, registry.get_schemas(), system_prompt
-                )
-                reactive_retries = 0
-                hook_manager.fire(HookEvent.POST_LLM_CALL, response=response)
-
-                messages.append({"role": "assistant", "content": response.content})
-
-                tool_uses = [b for b in response.content if b.type == "tool_use"]
-
-                if not tool_uses:
-                    # Turn complete: fire STOP so turn-end cleanup (durable memory
-                    # extraction/consolidation) runs off the loop. The hook is
-                    # best-effort and swallows its own errors, so a failure here
-                    # never disturbs the finished turn.
-                    hook_manager.fire(HookEvent.STOP, messages=messages)
-                    return True
-
-                tool_results = []
-                compact_requested = False
-                for tool_use in tool_uses:
-                    decision, reason = permission_manager.check(
-                        tool_use.name, tool_use.input
-                    )
-
-                    if decision == "deny":
-                        tool_results.append({
-                            "type": "tool_result",
-                            "tool_use_id": tool_use.id,
-                            "content": f"Denied: {reason}",
-                        })
-                        continue
-
-                    if decision == "ask":
-                        if not ask(tool_use.name, tool_use.input, reason):
-                            tool_results.append({
-                                "type": "tool_result",
-                                "tool_use_id": tool_use.id,
-                                "content": "User denied this action.",
-                            })
-                            continue
-
-                    console.print(
-                        f"  [cyan]→ {tool_use.name}[/cyan]"
-                        f"{escape(f'({tool_use.input})')}"
-                    )
-                    hook_manager.fire(
-                        HookEvent.PRE_TOOL_USE,
-                        tool_name=tool_use.name,
-                        tool_input=tool_use.input,
-                        tool_use_id=tool_use.id,
-                    )
-                    # A long-running bash command flagged run_in_background starts
-                    # on a worker thread and returns a placeholder immediately; its
-                    # result is injected as a notification on a later turn.
-                    if should_run_background(tool_use.name, tool_use.input):
-                        bg_id = background_manager.start(
-                            tool_use.input.get("command", "")
-                        )
-                        result = f"[Background task {bg_id} started]"
-                    else:
-                        result = registry.execute(tool_use.name, **tool_use.input)
-                    hook_manager.fire(
-                        HookEvent.POST_TOOL_USE,
-                        tool_name=tool_use.name,
-                        tool_input=tool_use.input,
-                        tool_use_id=tool_use.id,
-                        result=result,
-                    )
-                    _display_tool_result(result)
-                    # The compact tool only signals intent; the real compaction
-                    # runs once the whole batch is appended, below.
-                    if tool_use.name == "compact":
-                        compact_requested = True
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": tool_use.id,
-                        "content": result,
-                    })
-
-                used_todo = any(t.name == "todo_write" for t in tool_uses)
-                rounds_since_todo = 0 if used_todo else rounds_since_todo + 1
-                if rounds_since_todo >= 3:
-                    tool_results.append({
-                        "type": "text",
-                        "text": "<reminder>Update your todos.</reminder>",
-                    })
-                    rounds_since_todo = 0
-
-                messages.append({"role": "user", "content": tool_results})
-
-                # Batch is closed: collapse history into a summary now.
-                if compact_requested:
-                    messages[:] = compactor.compact_history(messages, active_request)
-
-            except KeyboardInterrupt:
-                del messages[snapshot:]
-                console.print("\n[dim]Interrupted.[/dim]")
-                return False
-            except Exception as e:
-                if (
-                    is_prompt_too_long(e)
-                    and reactive_retries < compactor.max_reactive_retries
-                ):
-                    messages[:] = compactor.reactive_compact(messages, active_request)
-                    reactive_retries += 1
-                    continue
-                del messages[snapshot:]
-                hook_manager.fire(HookEvent.ON_ERROR, error=str(e))
-                console.print(f"\n[bold red]Error:[/bold red] {e}")
-                return False
 
     def run_scheduled_turn() -> None:
         """Deliver due cron jobs as one agent turn (called under agent_lock).

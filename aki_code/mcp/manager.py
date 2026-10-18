@@ -73,3 +73,18 @@ class MCPManager:
             f"{name}: {', '.join(self.clients[name].tool_names())}"
             for name in self.connected()
         )
+
+    def prompt_state(self) -> str:
+        """Compact MCP state for the system prompt: available + connected servers.
+
+        Rebuilt each turn so the model sees servers connected earlier in the
+        session; the tools themselves surface immediately via get_schemas().
+        """
+        available = ", ".join(sorted(self.servers)) or "none"
+        if not self.clients:
+            return f"Available (connect with connect_mcp): {available}. None connected yet."
+        connected = "; ".join(
+            f"{name} -> {', '.join('mcp__' + name + '__' + t for t in self.clients[name].tool_names())}"
+            for name in self.connected()
+        )
+        return f"Available (connect with connect_mcp): {available}. Connected: {connected}."

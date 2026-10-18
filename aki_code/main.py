@@ -121,6 +121,25 @@ def run() -> None:
     # recalled per turn, so the full system prompt is rebuilt each request.
     skill_catalog = skill_loader.catalog()
     memory_store = MemoryStore(client, memory_dir=config.MEMORY_DIR)
+
+    # Turn-end cleanup rides the STOP hook (Lesson 15): when the lead's turn
+    # finishes, extract durable memories and consolidate once the store has
+    # grown. Best-effort and disk-only — the hook swallows its own errors so a
+    # failure never disturbs the finished turn, and the loop stays feature-agnostic.
+    def _memory_stop_hook(ctx):
+        msgs = ctx.data.get("messages")
+        if not msgs:
+            return
+        try:
+            if memory_store.extract_memories(msgs):
+                memory_store.maybe_consolidate()
+        except Exception as exc:
+            console.print(
+                f"  [dim]memory extraction skipped: {escape(str(exc))}[/dim]"
+            )
+
+    hook_manager.register(HookEvent.STOP, _memory_stop_hook)
+
     task_store = TaskStore(config.TASKS_DIR)
     background_manager = BackgroundManager()
     scheduler = CronScheduler(config.SCHEDULES_FILE)
@@ -209,7 +228,9 @@ def run() -> None:
         recalled = memory_store.load_memories(
             memory_store.select_relevant(active_request)
         )
-        system_prompt = build_system_prompt(skill_catalog, memory_store.render(recalled))
+        system_prompt = build_system_prompt(
+            skill_catalog, memory_store.render(recalled), mcp_manager.prompt_state()
+        )
 
         # active_request is restated in every compaction summary so the model
         # never loses sight of the goal after history is trimmed.
@@ -240,16 +261,11 @@ def run() -> None:
                 tool_uses = [b for b in response.content if b.type == "tool_use"]
 
                 if not tool_uses:
-                    # Turn complete: extract durable memories, then consolidate
-                    # once the store has grown. Disk-only and best-effort — a
-                    # failure here must never disturb the finished turn.
-                    try:
-                        if memory_store.extract_memories(messages):
-                            memory_store.maybe_consolidate()
-                    except Exception as exc:
-                        console.print(
-                            f"  [dim]memory extraction skipped: {escape(str(exc))}[/dim]"
-                        )
+                    # Turn complete: fire STOP so turn-end cleanup (durable memory
+                    # extraction/consolidation) runs off the loop. The hook is
+                    # best-effort and swallows its own errors, so a failure here
+                    # never disturbs the finished turn.
+                    hook_manager.fire(HookEvent.STOP, messages=messages)
                     return True
 
                 tool_results = []

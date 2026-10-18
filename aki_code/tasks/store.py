@@ -284,3 +284,21 @@ class TaskStore:
             if unblocked:
                 message += f"\nUnblocked: {', '.join(unblocked)}"
             return message
+
+    def release(self, task_id: str, owner: str = "agent") -> str:
+        """in_progress -> pending, clearing the owner (assignment released).
+
+        Used when a teammate is shut down or errors mid-task: the unfinished task
+        goes back to the board so another owner can claim it. The worktree binding
+        is kept, so a re-claim resumes in the same checkout.
+        """
+        with self.task_store_lock():
+            task = self.load(task_id)
+            if task.status != IN_PROGRESS:
+                return f"Task {task_id} is {task.status}, cannot release"
+            if task.owner != owner:
+                return f"Task {task_id} is owned by {task.owner}, not {owner}"
+            task.status = PENDING
+            task.owner = None
+            self.save(task)
+            return f"Released {task_id} ({task.subject})"

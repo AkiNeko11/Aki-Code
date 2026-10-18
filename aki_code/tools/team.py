@@ -112,7 +112,7 @@ class ShutdownTeammateTool(BaseTool):
 class SubmitPlanTool(BaseTool):
     """Teammate-side plan submission (Lesson 13).
 
-    Handled inside TeammateRuntime._run_tool (it needs the teammate's own gate
+    Handled inside TeammateRuntime._dispatch (it needs the teammate's own gate
     and work version), so the registered execute only guards against the Lead
     calling it directly.
     """

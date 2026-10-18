@@ -38,7 +38,6 @@ GATE_PENDING = "pending"
 GATE_APPROVED = "approved"
 GATE_REJECTED = "rejected"
 
-DEFAULT_MAX_TURNS = 30
 DEFAULT_IDLE_SCAN_INTERVAL = 0.5
 
 
@@ -68,7 +67,6 @@ class TeammateRuntime:
         workdir: str | None = None,
         assignments: Assignments | None = None,
         require_plan: bool = False,
-        max_turns: int = DEFAULT_MAX_TURNS,
         idle_scan_interval: float = DEFAULT_IDLE_SCAN_INTERVAL,
     ):
         self.name = name
@@ -76,12 +74,10 @@ class TeammateRuntime:
         self.task_store = task_store
         self.bus = bus
         self.permission_manager = permission_manager
-        self.hook_manager = hook_manager
         self.system_prompt = system_prompt or build_teammate_prompt(name)
         self.console = console
         self.workdir = workdir or os.getcwd()
         self.assignments = assignments or Assignments()
-        self.max_turns = max_turns
         self.idle_scan_interval = idle_scan_interval
 
         self.messages: list[dict] = []
@@ -99,11 +95,34 @@ class TeammateRuntime:
         # checkouts. Imported lazily: team.teammate <- tools <- tools.team <-
         # team.manager <- team.teammate would otherwise be a circular import.
         from aki_code.tools import create_teammate_registry
+        from aki_code.agent.harness import AgentHarness
 
         self.registry = create_teammate_registry(
             cwd_provider=self._current_cwd,
             task_store=task_store,
             skill_loader=skill_loader,
+        )
+
+        # The teammate runs the shared harness (Lesson 15) on a forked
+        # HookManager: the fork keeps the parent's observability hooks and the
+        # shared TokenTracker, while the plan-gate / exclusion / workspace block
+        # hook and the non-interactive permission hook stay private to this
+        # teammate and never leak onto the lead or a sibling. The block hook is
+        # registered before the harness adds the permission hook so a gated or
+        # excluded tool is refused without a permission prompt.
+        self.hooks = hook_manager.fork()
+        self.hooks.register(HookEvent.PRE_TOOL_USE, self._teammate_block_hook)
+        self.harness = AgentHarness(
+            hook_manager=self.hooks,
+            schema_provider=lambda: teammate_schemas(self.registry),
+            dispatch=self._dispatch,
+            llm_caller=self._llm,
+            permission_manager=permission_manager,
+            system_prompt=self.system_prompt,
+            pre_model=self._drain_inbox,
+            abort_check=lambda: self._stop.is_set(),
+            on_tool_start=self._tool_start,
+            text_extractor=extract_text,
         )
 
     def _current_cwd(self) -> str:
@@ -127,18 +146,17 @@ class TeammateRuntime:
     def _run(self) -> None:
         while not self._stop.is_set():
             if self.current_task is not None:
-                result = self._agent_loop()
-                self._report(self.current_task, result)
-                self.current_task = None
-                self.cwd = self.workdir  # release the assignment on going IDLE
-                self.assignments.release(self.name)
+                self._work_current_task()
             elif self._pending_directive:
-                self._agent_loop()
+                self._work()
                 self._pending_directive = False
+
+            if self._stop.is_set():
+                break
 
             inbox = self.bus.wait_for_messages(self.name, timeout=self.idle_scan_interval)
             if inbox:
-                if self._handle_messages(inbox):
+                if self._process_inbox(inbox, midwork=False):
                     break
                 continue
 
@@ -155,6 +173,43 @@ class TeammateRuntime:
                         f"Cannot start task {task.id}: {exc}", MSG_RESULT,
                         {"task_id": task.id},
                     )
+        self._cleanup_on_exit()
+
+    def _work_current_task(self) -> None:
+        """Run the claimed task's turn, then report, release or abandon it."""
+        task = self.current_task
+        result = self._work()
+        if self._stop.is_set():
+            # Shutdown interrupted the task mid-turn: put it back on the board so
+            # another owner can resume it (the worktree binding is preserved).
+            self.task_store.release(task.id, self.name)
+        elif result.ok:
+            self._report(task, result.text or "(no output)")
+        else:
+            # A model/tool error rolled the turn back: tell the lead and release
+            # the task rather than leaving it stuck in_progress under a dead owner.
+            self.bus.send(
+                self.name, "lead",
+                f"Task {task.id} failed and was released: {result.text or 'error'}",
+                MSG_RESULT, {"task_id": task.id},
+            )
+            self.task_store.release(task.id, self.name)
+        self.current_task = None
+        self.cwd = self.workdir  # release the assignment on going IDLE
+        self.assignments.release(self.name)
+
+    def _cleanup_on_exit(self) -> None:
+        """Thread teardown: never leave a dead teammate holding work or a lease.
+
+        Covers a task claimed but not yet worked when shutdown arrived, and drops
+        the assignment lease so the host does not see it blocking worktree
+        cleanup. release() is a no-op if the task is no longer in_progress.
+        """
+        if self.current_task is not None:
+            self.task_store.release(self.current_task.id, self.name)
+            self.current_task = None
+        self.cwd = self.workdir
+        self.assignments.release(self.name)
 
     def _begin_task(self, task) -> None:
         # Resolve and lease the working directory first so a broken binding
@@ -174,80 +229,80 @@ class TeammateRuntime:
             ),
         })
 
-    # ── WORK loop ───────────────────────────────────────────────
+    # ── WORK loop (shared harness) ──────────────────────────────
 
-    def _agent_loop(self) -> str:
-        schemas = teammate_schemas(self.registry)
-        for _ in range(self.max_turns):
-            self.hook_manager.fire(HookEvent.PRE_LLM_CALL, messages=self.messages)
-            response = call_with_retry(
-                lambda: self.client.messages.create(
-                    model=config.MODEL,
-                    max_tokens=config.MAX_TOKENS,
-                    system=self.system_prompt,
-                    messages=self.messages,
-                    tools=schemas,
-                )
+    def _work(self):
+        """Run one harness turn over the teammate's own persistent messages.
+
+        ask=None makes the permission hook non-interactive: anything that would
+        prompt the user is refused with a message the lead can act on, instead of
+        blocking on a terminal the teammate does not own.
+        """
+        return self.harness.run_turn(
+            self.messages,
+            ask=None,
+            ask_block_message=(
+                "Permission needed; a teammate cannot prompt the user: {reason}"
+            ),
+        )
+
+    def _llm(self, messages, tools, system):
+        return call_with_retry(
+            lambda: self.client.messages.create(
+                model=config.MODEL,
+                max_tokens=config.MAX_TOKENS,
+                system=system,
+                messages=messages,
+                tools=tools,
             )
-            self.hook_manager.fire(HookEvent.POST_LLM_CALL, response=response)
-            self.messages.append({"role": "assistant", "content": response.content})
+        )
 
-            tool_uses = [b for b in response.content if b.type == "tool_use"]
-            if not tool_uses:
-                return extract_text(response.content) or "(no summary)"
-
-            results = [
-                {
-                    "type": "tool_result",
-                    "tool_use_id": tool_use.id,
-                    "content": self._run_tool(tool_use),
-                }
-                for tool_use in tool_uses
-            ]
-            self.messages.append({"role": "user", "content": results})
-        return f"Teammate stopped after {self.max_turns} turns without a final answer."
-
-    def _run_tool(self, tool_use) -> str:
-        name = tool_use.name
-        if name == "submit_plan":
+    def _dispatch(self, tool_use) -> str:
+        # submit_plan is the teammate's own protocol tool, handled here rather
+        # than by the registry: it needs this teammate's gate and work version.
+        if tool_use.name == "submit_plan":
             return self._submit_plan(str(tool_use.input.get("plan", "")))
+        return self.registry.execute(tool_use.name, **tool_use.input)
+
+    def _tool_start(self, tool_use) -> None:
+        if self.console is not None:
+            self.console.print(
+                f"  \\[{self.name}] [cyan]→ {tool_use.name}[/cyan]"
+                f"{escape(f'({tool_use.input})')}"
+            )
+
+    def _teammate_block_hook(self, ctx):
+        """PreToolUse gate: exclusion, plan gate, workspace-requires-task.
+
+        Runs before the harness's permission hook and short-circuits it via the
+        block flag, mirroring the order the old inline dispatch used. submit_plan
+        is in none of these sets, so it flows through to _dispatch.
+        """
+        if ctx.data.get("block"):
+            return ctx
+        name = ctx.data.get("tool_name")
         if name in TEAMMATE_EXCLUDED_TOOLS:
-            return f"Tool '{name}' is not available to teammates."
-        if name in PLAN_GATED_TOOLS and self.gate_status not in (
+            ctx.data["block"] = f"Tool '{name}' is not available to teammates."
+        elif name in PLAN_GATED_TOOLS and self.gate_status not in (
             GATE_NOT_REQUIRED,
             GATE_APPROVED,
         ):
-            return f"Blocked: plan status is {self.gate_status}."
-        if name in WORKSPACE_TOOLS and self.current_task is None:
-            return "Claim a task before using workspace tools."
+            ctx.data["block"] = f"Blocked: plan status is {self.gate_status}."
+        elif name in WORKSPACE_TOOLS and self.current_task is None:
+            ctx.data["block"] = "Claim a task before using workspace tools."
+        return ctx
 
-        decision, reason = self.permission_manager.check(name, tool_use.input)
-        if decision == "deny":
-            return f"Denied: {reason}"
-        if decision == "ask":
-            # A teammate cannot prompt the terminal; hand the decision to the lead.
-            return f"Permission needed; a teammate cannot prompt the user: {reason}"
+    def _drain_inbox(self, messages) -> None:
+        """pre_model hook: read the mailbox before each model call.
 
-        if self.console is not None:
-            self.console.print(
-                f"  \\[{self.name}] [cyan]→ {name}[/cyan]"
-                f"{escape(f'({tool_use.input})')}"
-            )
-        self.hook_manager.fire(
-            HookEvent.PRE_TOOL_USE,
-            tool_name=name,
-            tool_input=tool_use.input,
-            tool_use_id=tool_use.id,
-        )
-        output = self.registry.execute(name, **tool_use.input)
-        self.hook_manager.fire(
-            HookEvent.POST_TOOL_USE,
-            tool_name=name,
-            tool_input=tool_use.input,
-            tool_use_id=tool_use.id,
-            result=output,
-        )
-        return output
+        This is what keeps a shutdown or a lead directive from being starved by a
+        long run of tool rounds — the teammate no longer only checks its inbox
+        between tasks. A shutdown sets _stop, which abort_check turns into a clean
+        end of the turn.
+        """
+        inbox = self.bus.read_inbox(self.name)
+        if inbox:
+            self._process_inbox(inbox, midwork=True)
 
     def _report(self, task, result_text: str) -> None:
         self.task_store.complete(task.id, self.name)
@@ -285,10 +340,17 @@ class TeammateRuntime:
             f"file-editing tools stay blocked until the lead approves."
         )
 
-    # ── IDLE message handling ───────────────────────────────────
+    # ── message handling (IDLE loop and mid-turn drain) ─────────
 
-    def _handle_messages(self, inbox: list[dict]) -> bool:
-        """Process inbox messages; return True if the teammate should stop."""
+    def _process_inbox(self, inbox: list[dict], *, midwork: bool) -> bool:
+        """Handle mailbox messages; return True if the teammate should stop.
+
+        midwork=True means we are inside a harness turn (drained by pre_model): a
+        directive is merged into the trailing user message so the model sees it on
+        the very next call, and no separate follow-up turn is queued. In IDLE
+        (midwork=False) a directive is appended and _pending_directive is set so
+        the loop runs a turn to respond.
+        """
         for msg in inbox:
             msg_type = msg.get("type")
             metadata = msg.get("metadata") or {}
@@ -300,34 +362,55 @@ class TeammateRuntime:
                 self._stop.set()
                 return True
             if msg_type == MSG_PLAN_APPROVAL_RESPONSE:
-                # Honor only if it matches the task/work version the plan was
-                # submitted for; claiming or releasing a task stale-ifies it.
-                resp_version = metadata.get("work_version")
-                resp_task = metadata.get("task_id")
-                version_ok = resp_version is None or resp_version == self.work_version
-                task_ok = resp_task is None or resp_task == self.gate_task_id
-                if version_ok and task_ok:
-                    self.gate_status = (
-                        GATE_APPROVED if metadata.get("approve") else GATE_REJECTED
-                    )
+                self._apply_plan_approval(metadata)
                 continue
             if msg_type == MSG_PLAN_REQUEST:
-                # The lead asked for a plan; nudge the model to produce one on
-                # the next WORK turn (submit_plan is the model's tool).
-                self.messages.append({
-                    "role": "user",
-                    "content": "[Message from lead] Please submit your plan for approval.",
-                })
+                # The lead asked for a plan; nudge the model to produce one
+                # (submit_plan is the model's tool).
+                self._inject_user_text(
+                    "[Message from lead] Please submit your plan for approval."
+                )
+            else:
+                # A free-text directive from the lead: take it into context.
+                self._inject_user_text(
+                    f"[Message from {msg.get('from', 'lead')}] {msg.get('content', '')}"
+                )
+            if not midwork:
                 self._pending_directive = True
-                continue
-            # A free-text directive from the lead: take it into context and work
-            # a turn to respond (workspace tools stay gated without a task).
-            self.messages.append({
-                "role": "user",
-                "content": f"[Message from {msg.get('from', 'lead')}] {msg.get('content', '')}",
-            })
-            self._pending_directive = True
         return False
+
+    def _apply_plan_approval(self, metadata: dict) -> None:
+        # Honor only if it matches the task/work version the plan was submitted
+        # for; claiming or releasing a task stale-ifies it.
+        resp_version = metadata.get("work_version")
+        resp_task = metadata.get("task_id")
+        version_ok = resp_version is None or resp_version == self.work_version
+        task_ok = resp_task is None or resp_task == self.gate_task_id
+        if version_ok and task_ok:
+            self.gate_status = (
+                GATE_APPROVED if metadata.get("approve") else GATE_REJECTED
+            )
+
+    def _inject_user_text(self, text: str) -> None:
+        """Add a lead directive, merging into a trailing user message if present.
+
+        Mid-turn the last message is a user tool_result batch, so appending a new
+        user message would put two user turns in a row (the endpoint rejects
+        that); merging keeps roles alternating, exactly as the lead loop does for
+        background and team notifications.
+        """
+        if self.messages and self.messages[-1].get("role") == "user":
+            prev = self.messages[-1].get("content")
+            block = {"type": "text", "text": text}
+            if isinstance(prev, list):
+                prev.append(block)
+            else:
+                self.messages[-1] = {
+                    "role": "user",
+                    "content": [{"type": "text", "text": prev}, block],
+                }
+        else:
+            self.messages.append({"role": "user", "content": text})
 
 
 def spawn_teammate(
@@ -344,7 +427,6 @@ def spawn_teammate(
     workdir: str | None = None,
     assignments: Assignments | None = None,
     require_plan: bool = False,
-    max_turns: int = DEFAULT_MAX_TURNS,
     idle_scan_interval: float = DEFAULT_IDLE_SCAN_INTERVAL,
 ) -> TeammateRuntime:
     """Claim the initial task, then start a teammate thread for it.
@@ -375,7 +457,6 @@ def spawn_teammate(
         workdir=workdir,
         assignments=assignments,
         require_plan=require_plan,
-        max_turns=max_turns,
         idle_scan_interval=idle_scan_interval,
     )
     runtime.start(initial_task=task)

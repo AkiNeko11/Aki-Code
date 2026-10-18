@@ -47,9 +47,17 @@ def permission_hook_factory(permission_manager):
         if decision == "ask":
             ask = data.get("ask")
             if ask is None:
-                data["block"] = data.get("ask_block_message") or (
-                    f"Permission needed; cannot prompt the user: {reason}"
-                )
+                template = data.get("ask_block_message")
+                if template:
+                    data["block"] = (
+                        template.format(reason=reason)
+                        if "{reason}" in template
+                        else template
+                    )
+                else:
+                    data["block"] = (
+                        f"Permission needed; cannot prompt the user: {reason}"
+                    )
             elif not ask(name, tool_input, reason):
                 data["block"] = "User denied this action."
         return ctx
@@ -85,6 +93,7 @@ class AgentHarness:
         system_prompt_provider: Callable[[str], str] | None = None,
         compactor=None,
         pre_model: Callable[[list], None] | None = None,
+        abort_check: Callable[[], bool] | None = None,
         on_tool_start: Callable[[object], None] | None = None,
         on_tool_result: Callable[[str], None] | None = None,
         on_interrupt: Callable[[], None] | None = None,
@@ -102,6 +111,7 @@ class AgentHarness:
         self.system_prompt_provider = system_prompt_provider
         self.compactor = compactor
         self.pre_model = pre_model
+        self.abort_check = abort_check
         self.on_tool_start = on_tool_start
         self.on_tool_result = on_tool_result
         self.on_interrupt = on_interrupt
@@ -148,6 +158,10 @@ class AgentHarness:
 
             if self.pre_model is not None:
                 self.pre_model(messages)
+            # An agent that drains its inbox in pre_model (a teammate) can be
+            # asked to shut down mid-turn; stop before spending a model call.
+            if self.abort_check is not None and self.abort_check():
+                return TurnResult(False)
             if self.compactor is not None:
                 messages[:] = self.compactor.prepare(messages, active_request)
             # Snapshot the clean pre-call state so a mid-round failure rolls back

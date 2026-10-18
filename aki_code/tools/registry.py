@@ -13,7 +13,10 @@ class ToolRegistry:
     def get_schemas(self) -> list[dict]:
         return [t.to_schema() for t in self._tools.values()]
 
-    def execute(self, name: str, **kwargs) -> str:
+    def execute(self, name, /, **kwargs) -> str:
+        # `name` is positional-only so a tool whose own input schema has a "name"
+        # argument (connect_mcp, create_worktree) cannot collide with it when the
+        # loop calls registry.execute(tool_name, **tool_input).
         tool = self._tools.get(name)
         if not tool:
             return f"Error: unknown tool '{name}'"

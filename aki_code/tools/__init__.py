@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from aki_code.tools.registry import ToolRegistry
 from aki_code.tools.bash import BashTool
 from aki_code.tools.file_read import ReadFileTool
@@ -32,6 +36,9 @@ from aki_code.tasks.store import TaskStore
 from aki_code.scheduler.scheduler import CronScheduler
 from aki_code.team.manager import TeamManager
 
+if TYPE_CHECKING:
+    from aki_code.mcp.manager import MCPManager
+
 
 def create_registry(
     *,
@@ -43,6 +50,7 @@ def create_registry(
     task_store: TaskStore,
     scheduler: CronScheduler,
     team_manager: TeamManager,
+    mcp_manager: MCPManager,
     ask_permission,
     console,
 ) -> ToolRegistry:
@@ -70,6 +78,13 @@ def create_registry(
     reg.register(ApprovePlanTool(team_manager))
     reg.register(ShutdownTeammateTool(team_manager))
     reg.register(CreateWorktreeTool(task_store))
+    # Imported lazily: mcp.tools subclasses tools.base.BaseTool, and a top-level
+    # import here would run tools/__init__ -> mcp.tools -> tools.base -> tools/
+    # __init__ in a partially-initialized cycle (same reason team.teammate defers
+    # its registry import).
+    from aki_code.mcp.tools import ConnectMcpTool
+
+    reg.register(ConnectMcpTool(registry=reg, manager=mcp_manager))
     reg.register(TaskTool(
         client=client,
         registry=reg,

@@ -138,6 +138,18 @@ class TasksCommand(BaseCommand):
         return CommandResult()
 
 
+class McpCommand(BaseCommand):
+    name = "mcp"
+    aliases = ()
+    description = "List connected MCP servers and their tools"
+
+    def execute(self, ctx: CommandContext, args: str) -> CommandResult:
+        ctx.console.print("[bold]MCP servers:[/bold]")
+        for line in ctx.mcp_manager.describe().splitlines():
+            ctx.console.print(f"  [dim]{escape(line)}[/dim]")
+        return CommandResult()
+
+
 class SkillCommand(BaseCommand):
     name = "skill"
     aliases = ("skills",)

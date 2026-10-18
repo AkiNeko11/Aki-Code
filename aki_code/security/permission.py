@@ -5,6 +5,9 @@ import re
 from enum import Enum
 from pathlib import Path
 
+from aki_code.mcp.naming import is_mcp_tool, parse_prefixed_name
+from aki_code.mcp.policy import mcp_policy
+
 
 class PermissionMode(Enum):
     """How aggressively the agent may act without asking.
@@ -86,6 +89,7 @@ SAFE_TOOLS_AUTO = {
     "approve_plan",
     "shutdown_teammate",
     "submit_plan",
+    "connect_mcp",
 }
 
 
@@ -181,6 +185,18 @@ class PermissionManager:
         # Read-only tools are auto-allowed (after boundary checks).
         if tool_name in SAFE_TOOLS_AUTO:
             return "allow", "Read-only tool, auto-allowed"
+
+        # Discovered MCP tools are authorized by host policy keyed on the
+        # normalized (server, tool) — never by the server's own readOnly/
+        # destructive hints. Anything unconfigured defaults to confirm ("ask").
+        if is_mcp_tool(tool_name):
+            parsed = parse_prefixed_name(tool_name)
+            if parsed is None:
+                return "ask", f"Malformed MCP tool name: {tool_name}"
+            server, mcp_tool = parsed
+            if mcp_policy(server, mcp_tool) == "allow":
+                return "allow", f"MCP host policy allows {server}.{mcp_tool}"
+            return "ask", f"MCP tool {server}.{mcp_tool} requires confirmation"
 
         # Layer 2, Level 1: Deny list (bash only).
         if tool_name == "bash":

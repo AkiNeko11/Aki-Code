@@ -5,12 +5,15 @@ from rich.markup import escape
 from aki_code import config
 from aki_code.llm.client import call_with_retry
 from aki_code.hooks.manager import HookEvent
+from aki_code.mcp.naming import is_mcp_tool
 
 MAX_TURNS = 30
 # The subagent shares the registry but must not recurse, touch shared state
 # (the todo list, the durable task graph), or request compaction (its loop does
 # not run the prepare() pipeline). Task claiming is the parent's job until
-# multi-agent coordination lands.
+# multi-agent coordination lands. connect_mcp is excluded so a subagent cannot
+# attach new servers, and discovered mcp__* tools are filtered out by prefix
+# below (Lesson 14 keeps MCP on the lead only).
 EXCLUDED_TOOLS = (
     "task",
     "todo_write",
@@ -24,7 +27,12 @@ EXCLUDED_TOOLS = (
     "schedule_cron",
     "list_crons",
     "cancel_cron",
+    "connect_mcp",
 )
+
+
+def _subagent_visible(schema_name: str) -> bool:
+    return schema_name not in EXCLUDED_TOOLS and not is_mcp_tool(schema_name)
 
 
 def extract_text(content) -> str:
@@ -54,7 +62,7 @@ def run_subagent(
     """
     messages: list[dict] = [{"role": "user", "content": prompt}]
     sub_schemas = [
-        s for s in registry.get_schemas() if s["name"] not in EXCLUDED_TOOLS
+        s for s in registry.get_schemas() if _subagent_visible(s["name"])
     ]
 
     for _ in range(max_turns):
@@ -78,7 +86,7 @@ def run_subagent(
         results = []
         for tool_use in tool_uses:
             # Defense in depth: refuse excluded tools even if the model asks.
-            if tool_use.name in EXCLUDED_TOOLS:
+            if not _subagent_visible(tool_use.name):
                 results.append({
                     "type": "tool_result",
                     "tool_use_id": tool_use.id,

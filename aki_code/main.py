@@ -24,6 +24,7 @@ from aki_code.memory import MemoryStore
 from aki_code.tasks import TaskStore
 from aki_code.scheduler import CronScheduler
 from aki_code.team import MessageBus, TeamManager
+from aki_code.mcp.manager import MCPManager
 from aki_code.background import (
     BackgroundManager,
     inject_background_results,
@@ -141,6 +142,10 @@ def run() -> None:
         hook_manager=hook_manager,
         console=console,
     )
+    # MCP servers are connected on demand by the model via connect_mcp; the
+    # manager holds the connected clients and registers their tools into the
+    # lead registry (Lesson 14). Mock servers only — no real transport yet.
+    mcp_manager = MCPManager()
     registry = create_registry(
         client=client,
         permission_manager=permission_manager,
@@ -150,6 +155,7 @@ def run() -> None:
         task_store=task_store,
         scheduler=scheduler,
         team_manager=team_manager,
+        mcp_manager=mcp_manager,
         ask_permission=_request_permission,
         console=console,
     )
@@ -453,6 +459,7 @@ def run() -> None:
                         compactor=compactor,
                         memory_store=memory_store,
                         task_store=task_store,
+                        mcp_manager=mcp_manager,
                     )
                     if command_registry.dispatch(user_input, ctx).action == CommandAction.EXIT:
                         exit_requested = True

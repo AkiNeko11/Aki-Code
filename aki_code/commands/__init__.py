@@ -4,6 +4,7 @@ from aki_code.commands.builtin import (
     ExitCommand,
     HelpCommand,
     HooksCommand,
+    McpCommand,
     MemoryCommand,
     ModeCommand,
     SkillCommand,
@@ -24,6 +25,7 @@ def create_command_registry() -> CommandRegistry:
     reg.register(TodoCommand())
     reg.register(TasksCommand())
     reg.register(SkillCommand())
+    reg.register(McpCommand())
     reg.register(MemoryCommand())
     reg.register(CompactCommand())
     reg.register(ExitCommand())

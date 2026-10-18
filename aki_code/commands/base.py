@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from aki_code.commands.registry import CommandRegistry
     from aki_code.compact.compactor import Compactor
     from aki_code.llm.usage import TokenTracker
+    from aki_code.mcp.manager import MCPManager
     from aki_code.memory.store import MemoryStore
     from aki_code.security.permission import PermissionManager
     from aki_code.session import SessionSettings
@@ -42,6 +43,7 @@ class CommandContext:
     compactor: "Compactor"
     memory_store: "MemoryStore"
     task_store: "TaskStore"
+    mcp_manager: "MCPManager"
 
 
 class BaseCommand(ABC):

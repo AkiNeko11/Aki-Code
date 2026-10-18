@@ -40,6 +40,18 @@ class HookManager:
     def unregister(self, event: HookEvent, callback: HookCallback) -> None:
         self._hooks[event].remove(callback)
 
+    def fork(self) -> "HookManager":
+        """A child manager carrying a copy of this one's registered hooks.
+
+        Lets an agent (subagent, teammate) add its own hooks — a permission or
+        tool-exclusion PreToolUse hook — without leaking them onto siblings that
+        share the parent manager. The copied callbacks are the same objects, so a
+        shared TokenTracker still aggregates usage across every fork.
+        """
+        child = HookManager()
+        child._hooks = {event: list(callbacks) for event, callbacks in self._hooks.items()}
+        return child
+
     def fire(self, event: HookEvent, **data) -> HookContext:
         ctx = HookContext(event=event, data=data)
         for callback in self._hooks[event]:

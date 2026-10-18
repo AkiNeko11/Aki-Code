@@ -34,6 +34,10 @@ def permission_hook_factory(permission_manager):
 
     def permission_hook(ctx):
         data = ctx.data
+        if data.get("block"):
+            # An earlier PreToolUse hook (e.g. a subagent's tool-exclusion) already
+            # blocked this call; do not re-evaluate or prompt for a doomed tool.
+            return ctx
         name = data.get("tool_name")
         tool_input = data.get("tool_input") or {}
         decision, reason = permission_manager.check(name, tool_input)
@@ -88,6 +92,7 @@ class AgentHarness:
         todo_nudge: bool = False,
         text_extractor: Callable[[object], str] | None = None,
         max_turns: int | None = None,
+        reraise_interrupt: bool = False,
     ):
         self.hook_manager = hook_manager
         self.schema_provider = schema_provider
@@ -104,6 +109,10 @@ class AgentHarness:
         self.todo_nudge = todo_nudge
         self.text_extractor = text_extractor
         self.max_turns = max_turns
+        # A one-shot subagent runs on the caller's thread, so an interrupt there
+        # must still bubble up and abort the parent turn (the lead swallows its
+        # own interrupt instead); reraise_interrupt preserves that.
+        self.reraise_interrupt = reraise_interrupt
         # Persists across turns on this instance, matching the lead's prior
         # nonlocal counter: three tool rounds without a todo_write nudge the model.
         self._rounds_since_todo = 0
@@ -227,6 +236,8 @@ class AgentHarness:
                 del messages[snapshot:]
                 if self.on_interrupt is not None:
                     self.on_interrupt()
+                if self.reraise_interrupt:
+                    raise
                 return TurnResult(False)
             except Exception as e:
                 if (

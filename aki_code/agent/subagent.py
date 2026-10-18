@@ -59,87 +59,75 @@ def run_subagent(
     Isolation is at the message level only: the subagent shares the working
     directory, permission rules, and lifecycle hooks with the parent. Its tool
     calls never enter the parent's conversation — only the final text does.
-    """
-    messages: list[dict] = [{"role": "user", "content": prompt}]
-    sub_schemas = [
-        s for s in registry.get_schemas() if _subagent_visible(s["name"])
-    ]
 
-    for _ in range(max_turns):
-        hook_manager.fire(HookEvent.PRE_LLM_CALL, messages=messages)
-        response = call_with_retry(
+    The loop is the shared AgentHarness (Lesson 15), configured for a one-shot
+    subagent: filtered schemas, interactive permission, no compaction / memory /
+    background routing, and a forked HookManager so its exclusion + permission
+    PreToolUse hooks never leak onto the parent or a teammate.
+    """
+    # Imported lazily: harness -> compact -> agent -> subagent would otherwise be
+    # a circular import at module load (the same reason team.teammate defers its
+    # registry import).
+    from aki_code.agent.harness import AgentHarness
+
+    sub_hooks = hook_manager.fork()
+
+    # Defense in depth: even though excluded tools are filtered out of the
+    # schemas, refuse one the model still asks for. Registered before the
+    # harness's permission hook so a doomed tool is blocked without prompting.
+    def _exclusion_hook(ctx):
+        name = ctx.data.get("tool_name")
+        if not _subagent_visible(name):
+            ctx.data["block"] = f"Tool '{name}' is not available inside a subagent."
+        return ctx
+
+    sub_hooks.register(HookEvent.PRE_TOOL_USE, _exclusion_hook)
+
+    def _dispatch(tool_use):
+        return registry.execute(tool_use.name, **tool_use.input)
+
+    def _llm(messages, tools, system_prompt):
+        return call_with_retry(
             lambda: client.messages.create(
                 model=config.MODEL,
                 max_tokens=config.MAX_TOKENS,
-                system=system,
+                system=system_prompt,
                 messages=messages,
-                tools=sub_schemas,
+                tools=tools,
             )
         )
-        hook_manager.fire(HookEvent.POST_LLM_CALL, response=response)
-        messages.append({"role": "assistant", "content": response.content})
 
-        tool_uses = [b for b in response.content if b.type == "tool_use"]
-        if not tool_uses:
-            return extract_text(response.content) or "(no summary)"
-
-        results = []
-        for tool_use in tool_uses:
-            # Defense in depth: refuse excluded tools even if the model asks.
-            if not _subagent_visible(tool_use.name):
-                results.append({
-                    "type": "tool_result",
-                    "tool_use_id": tool_use.id,
-                    "content": f"Tool '{tool_use.name}' is not available inside a subagent.",
-                })
-                continue
-
-            decision, reason = permission_manager.check(tool_use.name, tool_use.input)
-            if decision == "deny":
-                results.append({
-                    "type": "tool_result",
-                    "tool_use_id": tool_use.id,
-                    "content": f"Denied: {reason}",
-                })
-                continue
-            if decision == "ask" and not ask_permission(
-                tool_use.name, tool_use.input, reason
-            ):
-                results.append({
-                    "type": "tool_result",
-                    "tool_use_id": tool_use.id,
-                    "content": "User denied this action.",
-                })
-                continue
-
-            if console is not None:
-                console.print(
-                    f"  \\[sub] [cyan]→ {tool_use.name}[/cyan]"
-                    f"{escape(f'({tool_use.input})')}"
-                )
-            hook_manager.fire(
-                HookEvent.PRE_TOOL_USE,
-                tool_name=tool_use.name,
-                tool_input=tool_use.input,
-                tool_use_id=tool_use.id,
+    def _tool_start(tool_use):
+        if console is not None:
+            console.print(
+                f"  \\[sub] [cyan]→ {tool_use.name}[/cyan]"
+                f"{escape(f'({tool_use.input})')}"
             )
-            output = registry.execute(tool_use.name, **tool_use.input)
-            hook_manager.fire(
-                HookEvent.POST_TOOL_USE,
-                tool_name=tool_use.name,
-                tool_input=tool_use.input,
-                tool_use_id=tool_use.id,
-                result=output,
-            )
-            if console is not None:
-                preview = output if len(output) <= 500 else output[:500] + "..."
-                console.print(f"  \\[sub] [dim]← {escape(preview)}[/dim]")
-            results.append({
-                "type": "tool_result",
-                "tool_use_id": tool_use.id,
-                "content": output,
-            })
 
-        messages.append({"role": "user", "content": results})
+    def _tool_result(result):
+        if console is not None:
+            preview = result if len(result) <= 500 else result[:500] + "..."
+            console.print(f"  \\[sub] [dim]← {escape(preview)}[/dim]")
 
-    return f"Subagent stopped after {max_turns} turns without a final answer."
+    harness = AgentHarness(
+        hook_manager=sub_hooks,
+        schema_provider=lambda: [
+            s for s in registry.get_schemas() if _subagent_visible(s["name"])
+        ],
+        dispatch=_dispatch,
+        llm_caller=_llm,
+        permission_manager=permission_manager,
+        system_prompt=system,
+        on_tool_start=_tool_start,
+        on_tool_result=_tool_result,
+        text_extractor=extract_text,
+        max_turns=max_turns,
+        reraise_interrupt=True,
+    )
+
+    messages: list[dict] = [{"role": "user", "content": prompt}]
+    result = harness.run_turn(messages, ask=ask_permission)
+    if result.ok:
+        return result.text or "(no summary)"
+    # max_turns carries its own explanation; an API error leaves the text empty.
+    return result.text or "(subagent stopped without a result)"

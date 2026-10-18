@@ -67,8 +67,8 @@ class RequestPlanTool(BaseTool):
         return self._team.request_plan(name)
 
 
-class ApprovePlanTool(BaseTool):
-    name = "approve_plan"
+class ReviewPlanTool(BaseTool):
+    name = "review_plan"
     description = (
         "Approve or reject a teammate's plan using the request_id from its plan "
         "approval event. Approval unblocks the teammate's mutating tools."
@@ -87,11 +87,11 @@ class ApprovePlanTool(BaseTool):
         self._team = team
 
     def execute(self, *, request_id: str, approve: bool, feedback: str = "") -> str:
-        return self._team.approve_plan(request_id, approve, feedback=feedback)
+        return self._team.review_plan(request_id, approve, feedback=feedback)
 
 
-class ShutdownTeammateTool(BaseTool):
-    name = "shutdown_teammate"
+class RequestShutdownTool(BaseTool):
+    name = "request_shutdown"
     description = (
         "Ask a teammate to shut down gracefully. It finishes its current step, "
         "acknowledges, and exits."
@@ -106,7 +106,35 @@ class ShutdownTeammateTool(BaseTool):
         self._team = team
 
     def execute(self, *, name: str) -> str:
-        return self._team.shutdown_teammate(name)
+        return self._team.request_shutdown(name)
+
+
+class SendMessageTool(BaseTool):
+    """Lead -> teammate free-text message (Lesson 15).
+
+    A plain message only: it never changes task identity or plan state, so it is
+    safe mid-task. The teammate folds it into context on its next model call.
+    """
+
+    name = "send_message"
+    description = (
+        "Send a free-text message to a running teammate. Use it to steer or answer "
+        "a teammate without changing its task or plan state."
+    )
+    input_schema = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Teammate name."},
+            "message": {"type": "string", "description": "The message text."},
+        },
+        "required": ["name", "message"],
+    }
+
+    def __init__(self, team: TeamManager):
+        self._team = team
+
+    def execute(self, *, name: str, message: str) -> str:
+        return self._team.send_message(name, message)
 
 
 class SubmitPlanTool(BaseTool):

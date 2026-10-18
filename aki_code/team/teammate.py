@@ -10,6 +10,7 @@ from aki_code.agent.subagent import extract_text
 from aki_code.hooks.manager import HookEvent
 from aki_code.llm.client import call_with_retry
 from aki_code.llm.prompts import build_teammate_prompt
+from aki_code.mcp.naming import is_mcp_tool
 from aki_code.team.bus import (
     MSG_IDLE,
     MSG_PLAN_APPROVAL_REQUEST,
@@ -66,6 +67,7 @@ class TeammateRuntime:
         console=None,
         workdir: str | None = None,
         assignments: Assignments | None = None,
+        mcp_manager=None,
         require_plan: bool = False,
         idle_scan_interval: float = DEFAULT_IDLE_SCAN_INTERVAL,
     ):
@@ -78,6 +80,7 @@ class TeammateRuntime:
         self.console = console
         self.workdir = workdir or os.getcwd()
         self.assignments = assignments or Assignments()
+        self.mcp_manager = mcp_manager
         self.idle_scan_interval = idle_scan_interval
 
         self.messages: list[dict] = []
@@ -114,7 +117,7 @@ class TeammateRuntime:
         self.hooks.register(HookEvent.PRE_TOOL_USE, self._teammate_block_hook)
         self.harness = AgentHarness(
             hook_manager=self.hooks,
-            schema_provider=lambda: teammate_schemas(self.registry),
+            schema_provider=self._schemas,
             dispatch=self._dispatch,
             llm_caller=self._llm,
             permission_manager=permission_manager,
@@ -257,11 +260,26 @@ class TeammateRuntime:
             )
         )
 
+    def _schemas(self) -> list:
+        """Teammate tool schemas plus any MCP tools the lead has connected.
+
+        A teammate builds its own registry, so it does not hold the MCP adapters;
+        they are merged in from the shared MCPManager and gated by host policy
+        like any other tool.
+        """
+        schemas = teammate_schemas(self.registry)
+        if self.mcp_manager is not None:
+            schemas = schemas + self.mcp_manager.tool_schemas()
+        return schemas
+
     def _dispatch(self, tool_use) -> str:
         # submit_plan is the teammate's own protocol tool, handled here rather
         # than by the registry: it needs this teammate's gate and work version.
         if tool_use.name == "submit_plan":
             return self._submit_plan(str(tool_use.input.get("plan", "")))
+        # MCP tools live in the shared manager, not this teammate's own registry.
+        if self.mcp_manager is not None and is_mcp_tool(tool_use.name):
+            return self.mcp_manager.execute(tool_use.name, tool_use.input)
         return self.registry.execute(tool_use.name, **tool_use.input)
 
     def _tool_start(self, tool_use) -> None:
@@ -426,6 +444,7 @@ def spawn_teammate(
     console=None,
     workdir: str | None = None,
     assignments: Assignments | None = None,
+    mcp_manager=None,
     require_plan: bool = False,
     idle_scan_interval: float = DEFAULT_IDLE_SCAN_INTERVAL,
 ) -> TeammateRuntime:
@@ -456,6 +475,7 @@ def spawn_teammate(
         console=console,
         workdir=workdir,
         assignments=assignments,
+        mcp_manager=mcp_manager,
         require_plan=require_plan,
         idle_scan_interval=idle_scan_interval,
     )

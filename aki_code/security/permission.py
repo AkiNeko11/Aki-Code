@@ -85,9 +85,10 @@ SAFE_TOOLS_AUTO = {
     "cancel_cron",
     "spawn_teammate",
     "list_teammates",
+    "send_message",
     "request_plan",
-    "approve_plan",
-    "shutdown_teammate",
+    "review_plan",
+    "request_shutdown",
     "submit_plan",
     "connect_mcp",
 }

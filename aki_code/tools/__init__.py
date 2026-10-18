@@ -21,10 +21,11 @@ from aki_code.tools.schedule_cron import ScheduleCronTool
 from aki_code.tools.list_crons import ListCronsTool
 from aki_code.tools.cancel_cron import CancelCronTool
 from aki_code.tools.team import (
-    ApprovePlanTool,
     ListTeammatesTool,
     RequestPlanTool,
-    ShutdownTeammateTool,
+    RequestShutdownTool,
+    ReviewPlanTool,
+    SendMessageTool,
     SpawnTeammateTool,
     SubmitPlanTool,
 )
@@ -74,9 +75,10 @@ def create_registry(
     reg.register(CancelCronTool(scheduler))
     reg.register(SpawnTeammateTool(team_manager))
     reg.register(ListTeammatesTool(team_manager))
+    reg.register(SendMessageTool(team_manager))
     reg.register(RequestPlanTool(team_manager))
-    reg.register(ApprovePlanTool(team_manager))
-    reg.register(ShutdownTeammateTool(team_manager))
+    reg.register(ReviewPlanTool(team_manager))
+    reg.register(RequestShutdownTool(team_manager))
     reg.register(CreateWorktreeTool(task_store))
     # Imported lazily: mcp.tools subclasses tools.base.BaseTool, and a top-level
     # import here would run tools/__init__ -> mcp.tools -> tools.base -> tools/

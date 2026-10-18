@@ -160,6 +160,11 @@ def run() -> None:
         # with no jobs (the course requires the error to surface).
         console.print(f"[bold red]Schedule load error:[/bold red] {exc}")
     bus = MessageBus(config.MAILBOX_DIR)
+    # MCP servers are connected on demand by the model via connect_mcp; the
+    # manager holds the connected clients and registers their tools into the
+    # lead registry (Lesson 14). Mock servers only — no real transport yet. Built
+    # before the team so teammates can reach the connected MCP tools too (L15).
+    mcp_manager = MCPManager()
     # Each teammate builds its own cwd-bound registry, so TeamManager only needs
     # the skill loader (not the lead registry) — no circular wiring.
     team_manager = TeamManager(
@@ -170,11 +175,8 @@ def run() -> None:
         permission_manager=permission_manager,
         hook_manager=hook_manager,
         console=console,
+        mcp_manager=mcp_manager,
     )
-    # MCP servers are connected on demand by the model via connect_mcp; the
-    # manager holds the connected clients and registers their tools into the
-    # lead registry (Lesson 14). Mock servers only — no real transport yet.
-    mcp_manager = MCPManager()
     registry = create_registry(
         client=client,
         permission_manager=permission_manager,

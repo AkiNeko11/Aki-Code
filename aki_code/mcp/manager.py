@@ -19,6 +19,9 @@ class MCPManager:
     def __init__(self, *, servers=None):
         self.servers = dict(servers if servers is not None else MOCK_SERVERS)
         self.clients: dict[str, MCPClient] = {}
+        # prefixed name -> adapter, so an agent with its own registry (a teammate)
+        # can still reach the connected MCP tools the lead discovered.
+        self.adapters: dict[str, McpToolAdapter] = {}
 
     def connect(self, name: str, registry) -> str:
         """Connect a server and register its tools; return a status message.
@@ -48,19 +51,34 @@ class MCPManager:
             planned.append((prefixed, tool_def))
 
         for prefixed, tool_def in planned:
-            registry.register(
-                McpToolAdapter(
-                    name=prefixed,
-                    description=str(tool_def.get("description", "")),
-                    input_schema=tool_def.get("inputSchema")
-                    or {"type": "object", "properties": {}},
-                    client=client,
-                    raw_name=str(tool_def.get("name", "")),
-                )
+            adapter = McpToolAdapter(
+                name=prefixed,
+                description=str(tool_def.get("description", "")),
+                input_schema=tool_def.get("inputSchema")
+                or {"type": "object", "properties": {}},
+                client=client,
+                raw_name=str(tool_def.get("name", "")),
             )
+            registry.register(adapter)
+            self.adapters[prefixed] = adapter
         self.clients[name] = client
         names = ", ".join(prefixed for prefixed, _ in planned)
         return f"Connected MCP server '{name}' with tools: {names}"
+
+    def tool_schemas(self) -> list[dict]:
+        """Schemas for every connected MCP tool.
+
+        Lets an agent whose own registry does not hold the adapters (a teammate
+        builds a separate registry) still offer the lead-connected MCP tools.
+        """
+        return [adapter.to_schema() for adapter in self.adapters.values()]
+
+    def execute(self, prefixed_name: str, args: dict | None = None) -> str:
+        """Call a connected MCP tool by its prefixed name (teammate dispatch)."""
+        adapter = self.adapters.get(prefixed_name)
+        if adapter is None:
+            return f"MCP error: unknown tool '{prefixed_name}'"
+        return adapter.execute(**(args or {}))
 
     def connected(self) -> list[str]:
         return sorted(self.clients)

@@ -5,6 +5,7 @@ import threading
 
 from aki_code.team.bus import (
     MSG_IDLE,
+    MSG_MESSAGE,
     MSG_PLAN_APPROVAL_REQUEST,
     MSG_PLAN_APPROVAL_RESPONSE,
     MSG_PLAN_REQUEST,
@@ -51,6 +52,7 @@ class TeamManager:
         console=None,
         workdir: str | None = None,
         assignments: Assignments | None = None,
+        mcp_manager=None,
     ):
         self.bus = bus
         self.task_store = task_store
@@ -61,6 +63,7 @@ class TeamManager:
         self.console = console
         self.workdir = workdir or os.getcwd()
         self.assignments = assignments or Assignments()
+        self.mcp_manager = mcp_manager
         self.teammates: dict[str, TeammateRuntime] = {}
         self.pending: dict[str, ProtocolState] = {}
         self._lock = threading.RLock()
@@ -84,6 +87,7 @@ class TeamManager:
                     console=self.console,
                     workdir=self.workdir,
                     assignments=self.assignments,
+                    mcp_manager=self.mcp_manager,
                     require_plan=require_plan,
                 )
             except ValueError as exc:
@@ -165,7 +169,15 @@ class TeamManager:
         self.bus.send(LEAD, name, "Please submit your plan for approval.", MSG_PLAN_REQUEST)
         return f"Requested a plan from {name}"
 
-    def approve_plan(self, request_id: str, approve: bool, feedback: str = "") -> str:
+    def send_message(self, name: str, message: str) -> str:
+        """Send a free-text message to a teammate (no task/plan side effects)."""
+        with self._lock:
+            if name not in self.teammates:
+                return f"No such teammate: {name}"
+        self.bus.send(LEAD, name, message, MSG_MESSAGE)
+        return f"Sent a message to {name}"
+
+    def review_plan(self, request_id: str, approve: bool, feedback: str = "") -> str:
         with self._lock:
             state = self.pending.get(request_id)
             if state is None:
@@ -192,7 +204,7 @@ class TeamManager:
 
     # ── shutdown protocol ───────────────────────────────────────
 
-    def shutdown_teammate(self, name: str) -> str:
+    def request_shutdown(self, name: str) -> str:
         with self._lock:
             if name not in self.teammates:
                 return f"No such teammate: {name}"
@@ -207,7 +219,7 @@ class TeamManager:
         with self._lock:
             names = list(self.teammates)
         for name in names:
-            self.shutdown_teammate(name)
+            self.request_shutdown(name)
         with self._lock:
             runtimes = list(self.teammates.values())
             self.teammates.clear()

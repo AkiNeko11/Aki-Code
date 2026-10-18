@@ -19,16 +19,19 @@ if TYPE_CHECKING:
     from aki_code.tasks.store import TaskStore
     from aki_code.todo.manager import TodoManager
     from aki_code.workflow.runtime import WorkflowRuntime
+    from aki_code.goal.controller import GoalController
 
 
 class CommandAction(Enum):
     CONTINUE = "continue"
     EXIT = "exit"
+    RUN_AGENT = "run_agent"
 
 
 @dataclass
 class CommandResult:
     action: CommandAction = CommandAction.CONTINUE
+    prompt: str = ""
 
 
 @dataclass
@@ -46,6 +49,7 @@ class CommandContext:
     task_store: "TaskStore"
     mcp_manager: "MCPManager"
     workflow_runtime: "WorkflowRuntime | None" = None
+    goal_controller: "GoalController | None" = None
 
 
 class BaseCommand(ABC):

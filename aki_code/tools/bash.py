@@ -53,6 +53,5 @@ class BashTool(WorkspaceTool):
             output += result.stdout
         if result.stderr:
             output += f"\n[stderr]\n{result.stderr}"
-        if result.returncode != 0:
-            output += f"\n[exit code: {result.returncode}]"
-        return output.strip() or "(no output)"
+        output = output.strip() or "(no output)"
+        return f"{output}\n[exit code: {result.returncode}]"

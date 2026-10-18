@@ -5,19 +5,24 @@ from typing import Callable
 
 from aki_code.compact import is_prompt_too_long
 from aki_code.hooks.manager import HookEvent
+from aki_code.agent.lifecycle import StopDecision, TurnLimitReached
 
 
 @dataclass
 class TurnResult:
     """Outcome of one harness turn.
 
-    ok is False when the turn was interrupted or errored (after rolling back to
-    the pre-call snapshot); text is the final assistant text when a caller needs
-    it (subagent/teammate), empty for the lead which streams text as it goes.
+    ok describes execution, not goal achievement. A goal can defer or reach its
+    stop-block limit with ok=True; status/reason explain the handoff. Model
+    errors, interruptions and model-turn exhaustion return ok=False. text is the
+    final assistant text when requested, empty for the streaming lead.
     """
 
     ok: bool
     text: str = ""
+    status: str = "completed"
+    reason: str = ""
+    turns: int = 0
 
 
 def permission_hook_factory(permission_manager):
@@ -148,12 +153,17 @@ class AgentHarness:
         reactive_retries = 0
         iterations = 0
 
+        def append_message(message):
+            messages.append(message)
+            self.hook_manager.fire(HookEvent.MESSAGE_APPENDED, message=message)
+
+        def stopped(status, reason):
+            self.hook_manager.fire(HookEvent.TURN_STOPPED, status=status, reason=reason)
+            return TurnResult(False, reason, status, reason, iterations)
+
         while True:
             if self.max_turns is not None and iterations >= self.max_turns:
-                return TurnResult(
-                    False,
-                    f"Stopped after {self.max_turns} turns without a final answer.",
-                )
+                return stopped("limit", f"Stopped after {self.max_turns} turns without a final answer.")
             iterations += 1
 
             if self.pre_model is not None:
@@ -161,7 +171,8 @@ class AgentHarness:
             # An agent that drains its inbox in pre_model (a teammate) can be
             # asked to shut down mid-turn; stop before spending a model call.
             if self.abort_check is not None and self.abort_check():
-                return TurnResult(False)
+                self.hook_manager.fire(HookEvent.TURN_STOPPED, status="interrupted", reason="Agent stopped")
+                return TurnResult(False, status="interrupted", turns=iterations)
             if self.compactor is not None:
                 messages[:] = self.compactor.prepare(messages, active_request)
             # Snapshot the clean pre-call state so a mid-round failure rolls back
@@ -174,19 +185,33 @@ class AgentHarness:
                 reactive_retries = 0
                 self.hook_manager.fire(HookEvent.POST_LLM_CALL, response=response)
 
-                messages.append({"role": "assistant", "content": response.content})
+                append_message({"role": "assistant", "content": response.content})
                 tool_uses = [b for b in response.content if b.type == "tool_use"]
 
                 if not tool_uses:
-                    # Turn complete: fire STOP so turn-end cleanup (the lead's
-                    # durable memory extraction) runs off the loop.
-                    self.hook_manager.fire(HookEvent.STOP, messages=messages)
                     text = (
                         self.text_extractor(response.content)
                         if self.text_extractor is not None
                         else ""
                     )
-                    return TurnResult(True, text)
+                    gate = self.hook_manager.fire(
+                        HookEvent.BEFORE_STOP, messages=messages, text=text,
+                        decision=StopDecision(),
+                    )
+                    decision = gate.data["decision"]
+                    if not isinstance(decision, StopDecision) or decision.action not in {
+                        "allow", "block", "defer", "achieved", "failed", "limit", "goal_error", "restored"
+                    }:
+                        raise ValueError("Invalid stop-hook decision")
+                    if decision.action == "block":
+                        append_message({"role": "user", "content":
+                                        "[Completion check: continue working]\n" + decision.reason})
+                        continue
+                    if decision.action in {"allow", "achieved", "failed"}:
+                        self.hook_manager.fire(HookEvent.STOP, messages=messages,
+                                               status=decision.action)
+                    status = "completed" if decision.action == "allow" else decision.action
+                    return TurnResult(True, text, status, decision.reason, iterations)
 
                 tool_results = []
                 compact_requested = False
@@ -240,19 +265,22 @@ class AgentHarness:
                         })
                         self._rounds_since_todo = 0
 
-                messages.append({"role": "user", "content": tool_results})
+                append_message({"role": "user", "content": tool_results})
 
                 # Batch is closed: collapse history into a summary now.
                 if self.compactor is not None and compact_requested:
                     messages[:] = self.compactor.compact_history(messages, active_request)
 
+            except TurnLimitReached as exc:
+                return stopped("limit", str(exc))
             except KeyboardInterrupt:
                 del messages[snapshot:]
+                self.hook_manager.fire(HookEvent.TURN_STOPPED, status="interrupted", reason="Interrupted by user")
                 if self.on_interrupt is not None:
                     self.on_interrupt()
                 if self.reraise_interrupt:
                     raise
-                return TurnResult(False)
+                return TurnResult(False, status="interrupted", turns=iterations)
             except Exception as e:
                 if (
                     self.compactor is not None
@@ -264,6 +292,7 @@ class AgentHarness:
                     continue
                 del messages[snapshot:]
                 self.hook_manager.fire(HookEvent.ON_ERROR, error=str(e))
+                self.hook_manager.fire(HookEvent.TURN_STOPPED, status="error", reason=str(e))
                 if self.on_error is not None:
                     self.on_error(e)
-                return TurnResult(False)
+                return TurnResult(False, status="error", reason=str(e), turns=iterations)

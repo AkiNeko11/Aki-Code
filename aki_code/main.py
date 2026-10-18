@@ -2,6 +2,7 @@ import signal
 import threading
 import queue
 import time
+from contextlib import nullcontext
 from pathlib import Path
 
 from rich.console import Console
@@ -27,6 +28,7 @@ from aki_code.scheduler import CronScheduler
 from aki_code.team import MessageBus, TeamManager
 from aki_code.mcp.manager import MCPManager
 from aki_code.agent.harness import AgentHarness
+from aki_code.goal import GoalController, PromptGoalEvaluator
 from aki_code.background import (
     BackgroundManager,
     inject_background_results,
@@ -178,6 +180,33 @@ def run() -> None:
         console=console,
         mcp_manager=mcp_manager,
     )
+
+    def _goal_event(event):
+        state = event["goal"]
+        console.print(f"  [dim]goal {escape(state['status'])}: {escape(state['reason'][:350])}[/dim]")
+
+    def _evaluator_usage(response):
+        token_tracker.add_from_response(response)
+        goal.on_evaluator_response(response)
+
+    goal = GoalController(
+        PromptGoalEvaluator(client, config.GOAL_EVALUATOR_MODEL,
+                            max_chars=config.GOAL_EVALUATOR_MAX_CHARS,
+                            timeout=config.GOAL_EVALUATOR_TIMEOUT,
+                            on_response=_evaluator_usage),
+        max_stop_blocks=config.MAX_STOP_BLOCKS, max_turns=config.MAX_TURNS,
+        pending_work=lambda: (background_manager.has_pending(goal.current_id)
+                              or team_manager.has_pending_tasks(goal.state.task_ids)),
+        event_sink=_goal_event,
+        history_chars=max(2000, config.GOAL_EVALUATOR_MAX_CHARS * 2),
+    )
+    # These hooks belong only to the lead; subagents/teammates keep their own
+    # lifecycle, and workflow steps continue to use the observability-only fork.
+    lead_hooks.register(HookEvent.PRE_LLM_CALL, goal.before_model)
+    lead_hooks.register(HookEvent.POST_LLM_CALL, goal.on_model_response)
+    lead_hooks.register(HookEvent.MESSAGE_APPENDED, goal.record_message)
+    lead_hooks.register(HookEvent.BEFORE_STOP, goal.stop_hook)
+    lead_hooks.register(HookEvent.TURN_STOPPED, goal.on_turn_stopped)
     # Workflow steps use fresh harnesses and a restricted repository tool set.
     # The outer call waits synchronously; the runtime bounds internal parallelism.
     from aki_code.workflow.examples import register_builtin_workflows
@@ -267,9 +296,21 @@ def run() -> None:
         # thread and returns a placeholder immediately; its result is injected as
         # a notification on a later turn.
         if should_run_background(tool_use.name, tool_use.input):
-            bg_id = background_manager.start(tool_use.input.get("command", ""))
+            bg_id = background_manager.start(tool_use.input.get("command", ""), goal_id=goal.current_id)
             return f"[Background task {bg_id} started]"
-        return registry.execute(tool_use.name, **tool_use.input)
+        before = {task.id for task in task_store.list()} if goal.current_id and tool_use.name == "create_task" else set()
+        result = registry.execute(tool_use.name, **tool_use.input)
+        if goal.current_id:
+            if tool_use.name == "create_task":
+                goal.state.task_ids.update(task.id for task in task_store.list() if task.id not in before)
+            if tool_use.name in {"spawn_teammate", "send_message", "request_plan", "request_shutdown"}:
+                name = tool_use.input.get("name")
+                runtime = team_manager.teammates.get(name)
+                if runtime is not None:
+                    task = runtime.current_task
+                    if task is not None:
+                        goal.state.task_ids.add(task.id)
+        return result
 
     def _lead_system_prompt(active_request: str) -> str:
         # Recall memories relevant to this request and rebuild the system prompt
@@ -279,7 +320,27 @@ def run() -> None:
         )
         return build_system_prompt(
             skill_catalog, memory_store.render(recalled), mcp_manager.prompt_state()
-        )
+        ) + goal.prompt_section()
+
+    def _background_observed(record):
+        if goal.current_id and record.get("goal_id") == goal.current_id:
+            goal.observe_message({"role": "user", "content": record["notification"]})
+
+    def _pre_model(msgs):
+        # Cron/unrelated deliveries must not consume a deferred goal's results.
+        if not goal.suppressed:
+            inject_background_results(msgs, background_manager, on_result=_background_observed)
+
+    def _append_user(text, *, record_goal=True):
+        block = {"type": "text", "text": text}
+        if messages and messages[-1].get("role") == "user":
+            previous = messages[-1]["content"]
+            blocks = previous + [block] if isinstance(previous, list) else [{"type": "text", "text": previous}, block]
+            messages[-1] = {"role": "user", "content": blocks}
+        else:
+            messages.append({"role": "user", "content": text})
+        if record_goal:
+            lead_hooks.fire(HookEvent.MESSAGE_APPENDED, message={"role": "user", "content": text})
 
     def _lead_tool_start(tool_use) -> None:
         console.print(
@@ -294,26 +355,31 @@ def run() -> None:
         permission_manager=permission_manager,
         system_prompt_provider=_lead_system_prompt,
         compactor=compactor,
-        pre_model=lambda msgs: inject_background_results(msgs, background_manager),
+        pre_model=_pre_model,
         on_tool_start=_lead_tool_start,
         on_tool_result=_display_tool_result,
         on_interrupt=lambda: console.print("\n[dim]Interrupted.[/dim]"),
         on_error=lambda e: console.print(f"\n[bold red]Error:[/bold red] {e}"),
         todo_nudge=True,
+        max_turns=config.MAX_TURNS,
     )
 
-    def run_agent_turn(active_request: str, interactive: bool) -> bool:
+    def run_agent_turn(active_request: str, interactive: bool, *, apply_goal=True):
         """Run one full agent turn over the shared messages via the harness.
 
         Shared by the main REPL and the cron/team turn runners; the caller must
-        hold agent_lock. Returns True if the turn completed, False if it was
-        interrupted or errored (the harness rolls back to the pre-call snapshot).
+        hold agent_lock. Returns a TurnResult, separating execution errors from
+        goal completion, deferral and controlled stops. Cron runs outside Goal.
         `interactive` picks the permission callback: a scheduled turn runs on
         another thread and cannot prompt on stdin, so it auto-denies anything
         that would need approval.
         """
         ask = _request_permission if interactive else _deny_permission
-        return harness.run_turn(messages, active_request, ask=ask).ok
+        with (nullcontext() if apply_goal else goal.suspend()):
+            result = harness.run_turn(messages, active_request, ask=ask)
+        if result.status == "limit" and not goal.active:
+            console.print(result.reason, markup=False)
+        return result
 
 
     def run_scheduled_turn() -> None:
@@ -346,36 +412,51 @@ def run() -> None:
             messages.append({"role": "user", "content": [block]})
 
         console.print(f"  [magenta][cron] {len(fired)} scheduled task(s) firing[/magenta]")
-        if run_agent_turn(content, interactive=False):
+        if run_agent_turn(content, interactive=False, apply_goal=False).ok:
             scheduler.finalize_delivery(fired)
         else:
             messages[:] = saved
             scheduler.requeue(fired)
 
     def run_team_turn() -> bool:
-        """Deliver pending lead-inbox events as one interactive Lead turn.
+        """Deliver pending lead-inbox events without competing for terminal input.
 
-        Returns True if a turn ran. Events are drained from the mailbox and
-        injected as a single [Team events] user message; on a model failure the
-        message stays dangling so the normal retry path offers it again.
+        Returns True if events were received. A suspended goal records results
+        without automatically restarting; unrelated events do not drive its gate.
         """
         events = team_manager.consume_lead_inbox()
         if not events:
             return False
         text = team_manager.format_team_events(events)
-        block = {"type": "text", "text": text}
-        if messages and messages[-1].get("role") == "user":
-            prev = messages[-1].get("content")
-            merged = (
-                prev + [block]
-                if isinstance(prev, list)
-                else [{"type": "text", "text": prev}, block]
-            )
-            messages[-1] = {"role": "user", "content": merged}
-        else:
-            messages.append({"role": "user", "content": [block]})
+        _append_user(text, record_goal=False)
+        related = []
+        if goal.active:
+            related = [event for event in events
+                       if (event.get("metadata") or {}).get("task_id") in goal.state.task_ids]
+            if related:
+                goal.observe_message({"role": "user", "content": team_manager.format_team_events(related)})
         console.print(f"  [magenta][team] {len(events)} team event(s)[/magenta]")
-        run_agent_turn(text, interactive=True)
+        if not goal.active or goal.automatic_allowed and related:
+            # The stdin reader may already be waiting on a prompt.
+            run_agent_turn(text, interactive=False, apply_goal=bool(related))
+        return True
+
+    def run_background_turn() -> bool:
+        records = background_manager.collect_records()
+        if not records:
+            return False
+        text = "\n\n".join(record["notification"] for record in records)
+        _append_user(text, record_goal=False)
+        related = False
+        for record in records:
+            if goal.current_id and record.get("goal_id") == goal.current_id:
+                related = True
+                _background_observed(record)
+        console.print(f"  [magenta][background] {len(records)} task result(s) received[/magenta]")
+        if related and goal.automatic_allowed:
+            run_agent_turn(text, interactive=False)
+        elif not goal.active and all(record.get("goal_id") is None for record in records):
+            run_agent_turn(text, interactive=False, apply_goal=False)
         return True
 
     # Start the cron runtime only for the live CLI; importing this module must
@@ -431,28 +512,32 @@ def run() -> None:
                         task_store=task_store,
                         mcp_manager=mcp_manager,
                         workflow_runtime=workflow_runtime,
+                        goal_controller=goal,
                     )
-                    if command_registry.dispatch(user_input, ctx).action == CommandAction.EXIT:
+                    command = command_registry.dispatch(user_input, ctx)
+                    if command.action == CommandAction.EXIT:
                         exit_requested = True
+                    elif command.action == CommandAction.RUN_AGENT:
+                        hook_manager.fire(HookEvent.ON_USER_INPUT, user_input=command.prompt)
+                        _append_user(command.prompt)
+                        run_agent_turn(command.prompt, interactive=True)
                 else:
                     retrying = bool(messages) and messages[-1]["role"] == "user"
-                    if retrying:
-                        if user_input:
-                            messages[-1] = {"role": "user", "content": user_input}
-                            active_request = user_input
-                        else:
-                            prev = messages[-1].get("content")
-                            active_request = prev if isinstance(prev, str) else ""
-                        run_agent_turn(active_request, interactive=True)
-                    elif user_input:
+                    if user_input or goal.active:
+                        goal.resume_for_user()
+                        prompt = user_input or "Continue working toward the active goal using the available results."
                         hook_manager.fire(HookEvent.ON_USER_INPUT, user_input=user_input)
-                        messages.append({"role": "user", "content": user_input})
-                        run_agent_turn(user_input, interactive=True)
+                        _append_user(prompt)
+                        run_agent_turn(prompt, interactive=True)
+                    elif retrying:
+                        previous = messages[-1]["content"]
+                        prompt = previous if isinstance(previous, str) else "Retry the previous request using the recorded results."
+                        run_agent_turn(prompt, interactive=True)
             if exit_requested:
                 break
 
             # Re-arm the reader: show the retry hint (if any) then the prompt.
-            if bool(messages) and messages[-1]["role"] == "user":
+            if bool(messages) and messages[-1]["role"] == "user" and not goal.active:
                 console.print(
                     "[dim]Last request failed. Press Enter to retry, "
                     "or type a new message.[/dim]"
@@ -465,6 +550,12 @@ def run() -> None:
         if team_manager.has_lead_mail():
             with agent_lock:
                 ran = run_team_turn()
+            if ran:
+                continue
+
+        if background_manager.has_ready():
+            with agent_lock:
+                ran = run_background_turn()
             if ran:
                 continue
 

@@ -23,7 +23,7 @@ from aki_code.team.protocol import (
     ProtocolState,
     new_request_id,
 )
-from aki_code.team.teammate import TeammateRuntime, spawn_teammate
+from aki_code.team.teammate import GATE_PENDING, TeammateRuntime, spawn_teammate
 from aki_code.team.assignments import Assignments
 from aki_code.team.worktree import WorktreeError, remove_worktree
 
@@ -110,6 +110,26 @@ class TeamManager:
 
     def has_lead_mail(self) -> bool:
         return self.bus.peek(LEAD)
+
+    def has_pending_tasks(self, task_ids: set[str]) -> bool:
+        """Only work and undelivered results belonging to the active goal."""
+        if not task_ids:
+            return False
+        with self._lock:
+            for runtime in self.teammates.values():
+                task = runtime.current_task
+                if task is not None and task.id in task_ids:
+                    try:
+                        working = self.task_store.load(task.id).status == "in_progress"
+                    except KeyError:
+                        working = False
+                    # Completion can be delivered just before the worker clears
+                    # current_task. Waiting on that stale pointer would lose the
+                    # wakeup. A plan awaiting Lead approval also needs Lead action.
+                    if working and getattr(runtime, "gate_status", None) != GATE_PENDING:
+                        return True
+        return any((message.get("metadata") or {}).get("task_id") in task_ids
+                   for message in self.bus.peek_inbox(LEAD))
 
     def consume_lead_inbox(self) -> list[dict]:
         messages = self.bus.read_inbox(LEAD)

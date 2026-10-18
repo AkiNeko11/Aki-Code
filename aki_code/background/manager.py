@@ -56,9 +56,7 @@ def _format_bash_result(output: str, exit_code: int, max_output: int) -> str:
     text = (output or "").strip() or "(no output)"
     if len(text) > max_output:
         text = text[:max_output] + f"\n...[truncated to {max_output} chars]"
-    if exit_code != 0:
-        text += f"\n[exit code: {exit_code}]"
-    return text
+    return text + f"\n[exit code: {exit_code}]"
 
 
 def _format_notification(task_id: str, command: str, status: str, result: str) -> str:
@@ -96,7 +94,7 @@ class BackgroundManager:
         self._counter = 0
         self._lock = threading.Lock()
 
-    def start(self, command: str) -> str:
+    def start(self, command: str, *, goal_id: str | None = None, cwd: str | None = None) -> str:
         with self._lock:
             self._counter += 1
             task_id = f"bg_{self._counter:04d}"
@@ -104,6 +102,8 @@ class BackgroundManager:
                 "id": task_id,
                 "command": command,
                 "status": "running",
+                "goal_id": goal_id,
+                "cwd": cwd or os.getcwd(),
             }
         thread = threading.Thread(
             target=self._run, args=(task_id, command), daemon=True
@@ -121,6 +121,7 @@ class BackgroundManager:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                cwd=self.tasks[task_id]["cwd"],
                 **_popen_kwargs(),
             )
             with self._lock:
@@ -147,23 +148,33 @@ class BackgroundManager:
             self.results[task_id] = _format_bash_result(output, exit_code, self.max_output)
             self._ready.append(task_id)
 
-    def collect(self) -> list[str]:
-        """Drain finished jobs into <task_notification> strings."""
+    def has_ready(self) -> bool:
+        with self._lock:
+            return bool(self._ready)
+
+    def has_pending(self, goal_id: str) -> bool:
+        """Results queued but not delivered still count as pending evidence."""
+        with self._lock:
+            return any(task.get("goal_id") == goal_id
+                       and (task["status"] == "running" or task_id in self._ready)
+                       for task_id, task in self.tasks.items())
+
+    def collect_records(self) -> list[dict]:
+        """Atomically drain results with host-owned goal identity metadata."""
         with self._lock:
             ready = self._ready[:]
             self._ready.clear()
-        notifications = []
-        for task_id in ready:
-            task = self.tasks.get(task_id, {})
-            notifications.append(
-                _format_notification(
-                    task_id,
-                    task.get("command", ""),
-                    task.get("status", "completed"),
-                    self.results.get(task_id, ""),
-                )
-            )
-        return notifications
+            records = []
+            for task_id in ready:
+                task = dict(self.tasks[task_id])
+                task["result"] = self.results[task_id]
+                task["notification"] = _format_notification(
+                    task_id, task["command"], task["status"], task["result"])
+                records.append(task)
+            return records
+
+    def collect(self) -> list[str]:
+        return [record["notification"] for record in self.collect_records()]
 
     def teardown_all(self) -> None:
         """Kill every process group still running (called on agent exit)."""
@@ -173,7 +184,7 @@ class BackgroundManager:
             _kill_group(proc)
 
 
-def inject_background_results(messages: list, manager: BackgroundManager) -> None:
+def inject_background_results(messages: list, manager: BackgroundManager, *, on_result=None) -> None:
     """Merge any completed background notifications into the conversation.
 
     The original bash tool_use already got its placeholder tool_result, so a
@@ -181,9 +192,10 @@ def inject_background_results(messages: list, manager: BackgroundManager) -> Non
     tool_use_id. It is merged into the trailing user message (converting string
     content to a block list if needed) to keep user/assistant alternation valid.
     """
-    notes = manager.collect()
-    if not notes:
+    records = manager.collect_records()
+    if not records:
         return
+    notes = [record["notification"] for record in records]
     block = {"type": "text", "text": "\n\n".join(notes)}
     if messages and isinstance(messages[-1], dict) and messages[-1].get("role") == "user":
         content = messages[-1].get("content")
@@ -193,3 +205,6 @@ def inject_background_results(messages: list, manager: BackgroundManager) -> Non
             messages[-1]["content"] = [{"type": "text", "text": content}, block]
     else:
         messages.append({"role": "user", "content": [block]})
+    if on_result is not None:
+        for record in records:
+            on_result(record)

@@ -12,6 +12,10 @@ class HookEvent(Enum):
     POST_TOOL_USE = "post_tool_use"
     ON_USER_INPUT = "on_user_input"
     ON_ERROR = "on_error"
+    # A gate can block/defer a candidate stop before final cleanup runs.
+    BEFORE_STOP = "before_stop"
+    MESSAGE_APPENDED = "message_appended"
+    TURN_STOPPED = "turn_stopped"
     # Fired once when an agent turn ends (the model returned no tool_use). The
     # lead hangs turn-end cleanup on it — durable memory extraction and
     # consolidation — so the harness loop stays free of feature-specific ending

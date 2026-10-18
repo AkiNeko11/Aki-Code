@@ -76,3 +76,10 @@ WORKFLOW_MAX_CALLS: int = int(os.getenv("WORKFLOW_MAX_CALLS", "60"))
 WORKFLOW_MAX_TURNS: int = int(os.getenv("WORKFLOW_MAX_TURNS", "12"))
 WORKFLOW_MAX_TOKENS: int = int(os.getenv("WORKFLOW_MAX_TOKENS", "100000"))
 WORKFLOW_REQUEST_TIMEOUT: float = float(os.getenv("WORKFLOW_REQUEST_TIMEOUT", "120"))
+
+# Session goal gate (Lesson 17). No default model-turn cap; stop blocking is bounded.
+MAX_TURNS: int | None = int(os.getenv("MAX_TURNS", "0")) or None
+MAX_STOP_BLOCKS: int = int(os.getenv("MAX_STOP_BLOCKS", "10"))
+GOAL_EVALUATOR_MODEL: str = os.getenv("GOAL_EVALUATOR_MODEL", MODEL)
+GOAL_EVALUATOR_MAX_CHARS: int = int(os.getenv("GOAL_EVALUATOR_MAX_CHARS", "24000"))
+GOAL_EVALUATOR_TIMEOUT: float = float(os.getenv("GOAL_EVALUATOR_TIMEOUT", "60"))

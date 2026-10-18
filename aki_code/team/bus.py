@@ -86,7 +86,12 @@ class MessageBus:
         with self._changed:
             return self._read_unlocked(agent)
 
-    def _read_unlocked(self, agent: str) -> list[dict]:
+    def peek_inbox(self, agent: str) -> list[dict]:
+        """Inspect pending event identities without consuming their delivery."""
+        with self._changed:
+            return self._read_unlocked(agent, consume=False)
+
+    def _read_unlocked(self, agent: str, *, consume=True) -> list[dict]:
         path = self._path(agent)
         if not path.is_file():
             return []
@@ -105,10 +110,11 @@ class MessageBus:
                 continue  # skip a torn/partial line rather than lose the rest
             if isinstance(parsed, dict):
                 messages.append(parsed)
-        try:
-            path.unlink()
-        except OSError:
-            pass
+        if consume:
+            try:
+                path.unlink()
+            except OSError:
+                pass
         return messages
 
     def wait_for_messages(self, agent: str, timeout: float | None = None) -> list[dict]:

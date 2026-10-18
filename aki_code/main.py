@@ -124,7 +124,8 @@ def run() -> None:
     # The skill catalog is static for the session; the memory section is
     # recalled per turn, so the full system prompt is rebuilt each request.
     skill_catalog = skill_loader.catalog()
-    memory_store = MemoryStore(client, memory_dir=config.MEMORY_DIR)
+    memory_store = MemoryStore(client, memory_dir=config.MEMORY_DIR,
+                               on_response=token_tracker.add_from_response)
 
     # The lead runs on its own HookManager so its permission and turn-end hooks
     # never leak onto subagents/teammates: those still share `hook_manager`
@@ -258,7 +259,8 @@ def run() -> None:
         workflow_runtime=workflow_runtime,
     )
     command_registry = create_command_registry()
-    compactor = Compactor(client, todo_manager=todo_manager, console=console)
+    compactor = Compactor(client, todo_manager=todo_manager, console=console,
+                          on_response=token_tracker.add_from_response)
     messages: list[dict] = []
 
     # Serializes agent turns: the main REPL holds it while reading input is NOT

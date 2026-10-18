@@ -70,8 +70,10 @@ class Compactor:
         summary_max_tokens: int = config.SUMMARY_MAX_TOKENS,
         transcripts_dir: str | Path = config.TRANSCRIPTS_DIR,
         tool_outputs_dir: str | Path = config.TOOL_OUTPUTS_DIR,
+        on_response=None,
     ):
         self.client = client
+        self.on_response = on_response
         self.todo_manager = todo_manager
         self.console = console
         self.context_char_limit = context_char_limit
@@ -347,8 +349,11 @@ class Compactor:
                 max_tokens=self.summary_max_tokens,
                 system=SUMMARY_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": user_content}],
+                thinking={"type": "disabled"},
             )
         )
+        if self.on_response is not None:
+            self.on_response(response)
         return extract_text(response.content) or "(empty summary)"
 
     def summary_message(

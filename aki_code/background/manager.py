@@ -45,10 +45,12 @@ def _kill_group(proc: subprocess.Popen) -> None:
             pass
 
 
-def _combine(stdout: str | None, stderr: str | None) -> str:
-    output = stdout or ""
+def _combine(stdout: bytes | str | None, stderr: bytes | str | None) -> str:
+    from aki_code.shell import decode_shell_output
+
+    output = decode_shell_output(stdout)
     if stderr:
-        output += f"\n[stderr]\n{stderr}"
+        output += f"\n[stderr]\n{decode_shell_output(stderr)}"
     return output
 
 
@@ -120,7 +122,6 @@ class BackgroundManager:
                 shell=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
                 cwd=self.tasks[task_id]["cwd"],
                 **_popen_kwargs(),
             )

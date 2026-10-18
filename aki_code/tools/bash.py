@@ -3,6 +3,7 @@ from __future__ import annotations
 import subprocess
 
 from aki_code.tools.base import WorkspaceTool
+from aki_code.shell import decode_shell_output
 
 
 class BashTool(WorkspaceTool):
@@ -41,7 +42,6 @@ class BashTool(WorkspaceTool):
                 command,
                 shell=True,
                 capture_output=True,
-                text=True,
                 timeout=120,
                 cwd=self._cwd(),
             )
@@ -50,8 +50,8 @@ class BashTool(WorkspaceTool):
 
         output = ""
         if result.stdout:
-            output += result.stdout
+            output += decode_shell_output(result.stdout)
         if result.stderr:
-            output += f"\n[stderr]\n{result.stderr}"
+            output += f"\n[stderr]\n{decode_shell_output(result.stderr)}"
         output = output.strip() or "(no output)"
         return f"{output}\n[exit code: {result.returncode}]"

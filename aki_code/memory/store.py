@@ -132,8 +132,10 @@ class MemoryStore:
         consolidate_max_tokens: int = config.MEMORY_CONSOLIDATE_MAX_TOKENS,
         consolidate_threshold: int = config.MEMORY_CONSOLIDATE_THRESHOLD,
         dup_threshold: float = config.MEMORY_DUP_THRESHOLD,
+        on_response=None,
     ):
         self.client = client
+        self.on_response = on_response
         self.memory_dir = Path(memory_dir)
         self.index_name = index_name
         self.max_recall = max_recall
@@ -239,8 +241,11 @@ class MemoryStore:
                 max_tokens=self.select_max_tokens,
                 system=MEMORY_SELECT_PROMPT,
                 messages=[{"role": "user", "content": user_content}],
+                thinking={"type": "disabled"},
             )
         )
+        if self.on_response is not None:
+            self.on_response(response)
         parsed = _parse_json_array(extract_text(response.content))
         if parsed is None:
             return None
@@ -316,8 +321,11 @@ class MemoryStore:
                 max_tokens=self.extract_max_tokens,
                 system=MEMORY_EXTRACTION_SYSTEM_PROMPT,
                 messages=[{"role": "user", "content": user_content}],
+                thinking={"type": "disabled"},
             )
         )
+        if self.on_response is not None:
+            self.on_response(response)
         candidates = _parse_json_array(extract_text(response.content))
         if not candidates:
             return False
@@ -410,10 +418,13 @@ class MemoryStore:
                     max_tokens=self.consolidate_max_tokens,
                     system=MEMORY_CONSOLIDATION_SYSTEM_PROMPT,
                     messages=[{"role": "user", "content": user_content}],
+                    thinking={"type": "disabled"},
                 )
             )
         except Exception:
             return False
+        if self.on_response is not None:
+            self.on_response(response)
         validated = self._validate_consolidated(
             _parse_json_array(extract_text(response.content))
         )

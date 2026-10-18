@@ -13,6 +13,7 @@ from aki_code.llm.prompts import build_teammate_prompt
 from aki_code.mcp.naming import is_mcp_tool
 from aki_code.team.bus import (
     MSG_IDLE,
+    MSG_MESSAGE,
     MSG_PLAN_APPROVAL_REQUEST,
     MSG_PLAN_APPROVAL_RESPONSE,
     MSG_PLAN_REQUEST,
@@ -28,7 +29,7 @@ from aki_code.team.worktree import WorktreeError, resolve_task_cwd
 
 # Plan gate: mutating tools are blocked unless the plan is not required or has
 # been approved. Read-only tools are never gated.
-PLAN_GATED_TOOLS = frozenset({"bash", "write_file", "edit_file"})
+PLAN_GATED_TOOLS = frozenset({"bash", "write_file", "edit_file", "complete_task"})
 # Workspace tools operate on a claimed task's directory; a teammate with no task
 # must claim one first rather than touch the repository.
 WORKSPACE_TOOLS = frozenset({"bash", "read_file", "write_file", "edit_file", "glob"})
@@ -90,6 +91,7 @@ class TeammateRuntime:
         self.work_version = 0
         self.gate_task_id: str | None = None
         self._pending_directive = False
+        self._waiting_for_plan = False
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -149,7 +151,9 @@ class TeammateRuntime:
     def _run(self) -> None:
         while not self._stop.is_set():
             if self.current_task is not None:
-                self._work_current_task()
+                if not self._waiting_for_plan:
+                    self._pending_directive = False
+                    self._work_current_task()
             elif self._pending_directive:
                 self._work()
                 self._pending_directive = False
@@ -163,6 +167,8 @@ class TeammateRuntime:
                     break
                 continue
 
+            if self.current_task is not None:
+                continue
             task = self.task_store.claim_next_task(self.name)
             if task is not None:
                 try:
@@ -186,6 +192,17 @@ class TeammateRuntime:
             # Shutdown interrupted the task mid-turn: put it back on the board so
             # another owner can resume it (the worktree binding is preserved).
             self.task_store.release(task.id, self.name)
+        elif result.ok and self.gate_status not in (GATE_NOT_REQUIRED, GATE_APPROVED):
+            # A model's final "waiting for approval" ends only this turn. Keep
+            # its claim and workspace lease, and park without spending API calls
+            # until the Lead responds. It has not completed the task.
+            self._waiting_for_plan = True
+            if self.gate_status != GATE_PENDING:
+                self.bus.send(
+                    self.name, "lead", f"Task {task.id} awaits an approved plan: {result.text}",
+                    MSG_MESSAGE, {"task_id": task.id},
+                )
+            return
         elif result.ok:
             self._report(task, result.text or "(no output)")
         else:
@@ -222,6 +239,9 @@ class TeammateRuntime:
         cwd = self.assignments.assign(self.name, task, self.workdir)
         self.current_task = task
         self.cwd = cwd
+        self._waiting_for_plan = False
+        if self.gate_status != GATE_NOT_REQUIRED:
+            self.gate_status = GATE_REQUIRED
         # Claiming changes task identity, so any prior plan approval is stale.
         self.work_version += 1
         self.gate_task_id = task.id
@@ -380,7 +400,12 @@ class TeammateRuntime:
                 self._stop.set()
                 return True
             if msg_type == MSG_PLAN_APPROVAL_RESPONSE:
-                self._apply_plan_approval(metadata)
+                if self._apply_plan_approval(metadata):
+                    self._waiting_for_plan = False
+                    self._inject_user_text(
+                        f"[Plan {self.gate_status} by lead] {msg.get('content', '')}\n"
+                        "Continue the claimed task under the current plan decision."
+                    )
                 continue
             if msg_type == MSG_PLAN_REQUEST:
                 # The lead asked for a plan; nudge the model to produce one
@@ -394,10 +419,11 @@ class TeammateRuntime:
                     f"[Message from {msg.get('from', 'lead')}] {msg.get('content', '')}"
                 )
             if not midwork:
+                self._waiting_for_plan = False
                 self._pending_directive = True
         return False
 
-    def _apply_plan_approval(self, metadata: dict) -> None:
+    def _apply_plan_approval(self, metadata: dict) -> bool:
         # Honor only if it matches the task/work version the plan was submitted
         # for; claiming or releasing a task stale-ifies it.
         resp_version = metadata.get("work_version")
@@ -408,6 +434,8 @@ class TeammateRuntime:
             self.gate_status = (
                 GATE_APPROVED if metadata.get("approve") else GATE_REJECTED
             )
+            return True
+        return False
 
     def _inject_user_text(self, text: str) -> None:
         """Add a lead directive, merging into a trailing user message if present.

@@ -86,6 +86,7 @@ class BackgroundManager:
         *,
         timeout: int = config.BACKGROUND_JOB_TIMEOUT,
         max_output: int = config.BACKGROUND_MAX_OUTPUT_CHARS,
+        event_sink=None,
     ):
         self.timeout = timeout
         self.max_output = max_output
@@ -95,9 +96,14 @@ class BackgroundManager:
         self._procs: dict[str, subprocess.Popen] = {}
         self._counter = 0
         self._lock = threading.Lock()
+        self._closed = False
+        self._threads = []
+        self._event_sink = event_sink
 
     def start(self, command: str, *, goal_id: str | None = None, cwd: str | None = None) -> str:
         with self._lock:
+            if self._closed:
+                raise RuntimeError("Background manager is closed")
             self._counter += 1
             task_id = f"bg_{self._counter:04d}"
             self.tasks[task_id] = {
@@ -107,26 +113,28 @@ class BackgroundManager:
                 "goal_id": goal_id,
                 "cwd": cwd or os.getcwd(),
             }
-        thread = threading.Thread(
-            target=self._run, args=(task_id, command), daemon=True
-        )
-        thread.start()
+            thread = threading.Thread(
+                target=self._run, args=(task_id, command), daemon=True
+            )
+            self._threads.append(thread)
+            thread.start()
         return task_id
 
     def _run(self, task_id: str, command: str) -> None:
         output = ""
         exit_code = -1
         try:
-            proc = subprocess.Popen(
-                command,
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                cwd=self.tasks[task_id]["cwd"],
-                **_popen_kwargs(),
-            )
             with self._lock:
+                if self._closed:
+                    raise RuntimeError("Background manager closed before command started")
+                proc = subprocess.Popen(
+                    command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    cwd=self.tasks[task_id]["cwd"], **_popen_kwargs(),
+                )
                 self._procs[task_id] = proc
+            if self._event_sink is not None:
+                self._event_sink({"type": "background_process", "pid": proc.pid,
+                                  "task_id": task_id})
             try:
                 stdout, stderr = proc.communicate(timeout=self.timeout)
                 exit_code = proc.returncode if proc.returncode is not None else -1
@@ -141,7 +149,10 @@ class BackgroundManager:
             exit_code = -1
         finally:
             with self._lock:
-                self._procs.pop(task_id, None)
+                finished = self._procs.pop(task_id, None)
+            if finished is not None and self._event_sink is not None:
+                self._event_sink({"type": "background_process_finished", "pid": finished.pid,
+                                  "task_id": task_id})
 
         status = "completed" if exit_code == 0 else "failed"
         with self._lock:
@@ -180,9 +191,13 @@ class BackgroundManager:
     def teardown_all(self) -> None:
         """Kill every process group still running (called on agent exit)."""
         with self._lock:
+            self._closed = True
             procs = list(self._procs.values())
+            threads = list(self._threads)
         for proc in procs:
             _kill_group(proc)
+        for thread in threads:
+            thread.join(timeout=2)
 
 
 def inject_background_results(messages: list, manager: BackgroundManager, *, on_result=None) -> None:

@@ -7,12 +7,12 @@ import shutil
 from aki_code.shell import get_execution_shell
 
 
-def _detect_environment() -> str:
+def _detect_environment(workspace=None) -> str:
     system = platform.system()
     release = platform.release()
     machine = platform.machine()
     shell = get_execution_shell()
-    cwd = os.getcwd()
+    cwd = str(workspace) if workspace is not None else os.getcwd()
     path_sep = os.sep
 
     lines = [
@@ -61,11 +61,12 @@ Always use tools when you need to interact with the codebase. Don't guess file c
 
 
 def build_system_prompt(
-    skill_catalog: str = "", memory_text: str = "", mcp_text: str = ""
+    skill_catalog: str = "", memory_text: str = "", mcp_text: str = "",
+    *, workspace=None, include_team: bool = True,
 ) -> str:
-    env = _detect_environment()
+    env = _detect_environment(workspace)
     prompt = f"{_BASE_PROMPT}\n\n# Environment\n{env}"
-    prompt += (
+    team_prompt = (
         "\n\n# Leading a team\n"
         "You can run work in parallel by spawning teammates on tasks from the "
         "shared task board. When parallel work would help, FIRST propose a small "
@@ -76,6 +77,8 @@ def build_system_prompt(
         "results, idle notifications, and plan-approval requests arrive as "
         "[Team events] — react to them; do not poll list_teammates in a loop."
     )
+    if include_team:
+        prompt += team_prompt
     if memory_text:
         prompt += (
             "\n\n# Recalled memory\n"
@@ -105,15 +108,16 @@ def build_system_prompt(
     return prompt
 
 
-def build_subagent_prompt() -> str:
+def build_subagent_prompt(workspace=None) -> str:
     """System prompt for the nested subagent loop (Lesson 06).
 
     Deliberately terse: the subagent gets a self-contained task, does the work,
     and returns a concise final answer that becomes the parent's tool result.
     """
-    env = _detect_environment()
+    cwd = str(workspace) if workspace is not None else os.getcwd()
+    env = _detect_environment(workspace)
     return (
-        f"You are a coding agent working in {os.getcwd()}.\n\n"
+        f"You are a coding agent working in {cwd}.\n\n"
         f"Complete the given task using the available tools, then return a "
         f"concise final answer. Only your final text is shown to the caller — "
         f"tool calls and intermediate steps are not.\n\n"

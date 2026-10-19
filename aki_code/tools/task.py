@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from aki_code.agent.subagent import run_subagent
-from aki_code.llm.prompts import SUBAGENT_SYSTEM_PROMPT
+from aki_code.llm.prompts import build_subagent_prompt
 from aki_code.tools.base import BaseTool
 
 
@@ -43,6 +43,7 @@ class TaskTool(BaseTool):
         hook_manager,
         ask_permission,
         console=None,
+        workspace=None,
     ):
         self._client = client
         self._registry = registry
@@ -50,6 +51,7 @@ class TaskTool(BaseTool):
         self._hook_manager = hook_manager
         self._ask_permission = ask_permission
         self._console = console
+        self._workspace = workspace
 
     def execute(self, *, prompt: str) -> str:
         return run_subagent(
@@ -59,6 +61,6 @@ class TaskTool(BaseTool):
             permission_manager=self._permission_manager,
             hook_manager=self._hook_manager,
             ask_permission=self._ask_permission,
-            system=SUBAGENT_SYSTEM_PROMPT,
+            system=build_subagent_prompt(self._workspace),
             console=self._console,
         )

@@ -55,13 +55,17 @@ def create_registry(
     ask_permission,
     console,
     workflow_runtime=None,
+    workspace=None,
+    profile="interactive",
+    event_sink=None,
 ) -> ToolRegistry:
     reg = ToolRegistry()
-    reg.register(BashTool())
-    reg.register(ReadFileTool())
-    reg.register(WriteFileTool())
-    reg.register(EditFileTool())
-    reg.register(GlobTool())
+    cwd_provider = (lambda: workspace) if workspace is not None else None
+    reg.register(BashTool(cwd_provider, event_sink=event_sink))
+    reg.register(ReadFileTool(cwd_provider))
+    reg.register(WriteFileTool(cwd_provider))
+    reg.register(EditFileTool(cwd_provider))
+    reg.register(GlobTool(cwd_provider))
     reg.register(TodoWriteTool(todo_manager))
     reg.register(LoadSkillTool(skill_loader))
     reg.register(CompactTool())
@@ -99,7 +103,15 @@ def create_registry(
         hook_manager=hook_manager,
         ask_permission=ask_permission,
         console=console,
+        workspace=workspace,
     ))
+    if profile == "coding":
+        # Prune the actual registry, so unavailable tools cannot be dispatched
+        # even if a model fabricates a name absent from its schemas.
+        reg.restrict({"bash", "read_file", "write_file", "edit_file", "glob",
+                      "todo_write", "load_skill", "compact", "task"})
+    elif profile != "interactive":
+        raise ValueError(f"Unknown tool profile: {profile}")
     return reg
 
 

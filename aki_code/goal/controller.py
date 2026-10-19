@@ -133,7 +133,7 @@ class GoalController:
         if action in {"achieved", "failed"}:
             state.active = state.automatic = False
             state.finished_at = time.time()
-        elif action in {"limit", "goal_error", "error", "interrupted"}:
+        elif action in {"limit", "goal_error", "error", "interrupted", "blocked", "timeout"}:
             state.automatic = False
         self._emit()
         return StopDecision(action, reason)
@@ -178,7 +178,7 @@ class GoalController:
             size -= len(json.dumps(self.state.history.pop(0), ensure_ascii=False))
 
     def on_turn_stopped(self, ctx):
-        if self.current_id and ctx.data.get("status") in {"limit", "error", "interrupted"}:
+        if self.current_id and ctx.data.get("status") in {"limit", "error", "interrupted", "blocked", "timeout"}:
             self._decision(ctx.data["status"], ctx.data.get("reason", "Agent stopped"))
 
     def stop_hook(self, ctx):

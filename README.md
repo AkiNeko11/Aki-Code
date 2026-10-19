@@ -39,7 +39,7 @@
 
 ## 4. 架构设计
 
-`main.py` 负责组装运行时、接收用户输入和投递异步事件；`AgentHarness` 负责模型调用、工具调度与回合生命周期。下面展示主会话的执行路径：
+`runtime.py` 组装共享运行时；`main.py` 承载交互入口，`headless.py` 承载非交互单任务入口。两种入口都通过 `AgentHarness` 执行模型调用、工具调度与回合生命周期。下面展示主会话的执行路径：
 
 ```mermaid
 flowchart TD
@@ -76,7 +76,9 @@ Skills 按需读取；记忆从磁盘选择性召回；大工具结果和历史�
 
 包括初次失败和复测，共发出 175 次 API 请求。这是单轮功能验证记录，不能换算为真实代码修复任务的成功率；SWE-bench Lite 尚未开展。
 
-临时测试驱动已清理，原始报告和日志保存在本地 `.task_outputs/`，不随 Git 发布；仓库当前未提供持久维护的自动化测试套件或 CI。
+上述联调的临时驱动已清理，原始报告和日志保存在本地 `.task_outputs/`，不随 Git 发布。非交互入口另外提供离线自动化测试，使用临时 Git 仓库和本机模拟 API，覆盖完整 CLI、权限、共享限额、后台续轮、Goal、超时清理和补丁还原；运行方式为 `python -m unittest discover -s tests -v`。当前未配置 CI。
+
+2026-10-19 对新增的非交互入口进行真实 API 冒烟验证：在独立的小型仓库中先观察测试失败，修复加法函数，再确认三个固定测试通过、测试文件未修改，最终由 Goal 判断器返回 `achieved` 并导出补丁。该成功运行使用 7 次模型请求、18,835 Token；这是入口功能检查，未计入上方 S17 联调统计，也不构成 benchmark 成绩。
 
 ## 6. 快速开始
 
@@ -133,6 +135,55 @@ cp .env.example .env
 ```
 
 此模式自动接受允许目录内的文件编辑，Shell 命令规则和其他权限检查仍然生效。
+
+### 非交互执行一个任务
+
+适合在 WSL、Docker 或服务器上由脚本启动任务。准备一个已有提交且干净的 Git 仓库，以及 UTF-8 编码的任务文件：
+
+```powershell
+.\.venv\Scripts\python.exe -m aki_code.main run `
+  --task-file E:/tasks/task.txt `
+  --workspace E:/tasks/repo `
+  --output-dir E:/runs/task-001 `
+  --permission-mode accept-edits `
+  --max-turns 30 --max-calls 60 --max-tokens 100000 --timeout 600
+```
+
+Linux / WSL 使用相同参数，例如：
+
+```bash
+.venv/bin/python -m aki_code.main run \
+  --task-file /tasks/task.txt --workspace /tasks/repo \
+  --output-dir /runs/task-001 --permission-mode accept-edits
+```
+
+`--task "任务描述"` 与 `--task-file` 二选一；任务文本直接交给模型，内容中的 `/goal` 等字符串不会触发 CLI 命令。需要独立完成判断时，另传 `--goal "验证命令退出码为 0"`。
+
+| 参数 | 默认值 / 要求 | 含义 |
+| --- | --- | --- |
+| `--workspace` | 必填 | 干净的 Git 仓库根目录，包含至少一个提交；暂不支持子模块 |
+| `--output-dir` | 必填 | 工作区外的新目录，不覆盖已有运行结果 |
+| `--permission-mode` | `default` | 可选 `accept-edits`；遇到需要人工确认的操作时返回 `blocked` |
+| `--max-turns` | `30` | 整个任务的主 Agent 模型轮数，后台及 Goal 续轮累计计数 |
+| `--max-calls` | `60` | 全部模型请求尝试次数，包含子 Agent、摘要、Goal 判断和重试 |
+| `--max-tokens` | `100000` | 所有已收到响应的 Token 软阈值，包含缓存 Token；单次在途请求可能超出 |
+| `--timeout` | `600` | 工作进程总时限，单位秒，包含 API、工具及后台等待；退出后另做清理和补丁导出 |
+| `--goal` | 不启用 | 可选的、可验证的完成条件 |
+
+首版提供文件读写、路径搜索、Shell、Todo、技能、上下文压缩和一次性子 Agent，共九个基础工具。支持后台 Shell；不开放 cron、常驻队友、MCP 和 Workflow。默认关闭长期记忆的召回与提取，每次运行使用全新会话，状态和历史归档保存到输出目录的 `state/` 中。
+
+| 产物 | 内容 |
+| --- | --- |
+| `result.json` | 最终状态、退出码、原因、基准提交、配置、耗时和模型用量 |
+| `events.jsonl` | 请求、工具、Goal 与后台任务事件；包含运行过程中的消息 |
+| `messages.json` | 最近保存的主会话上下文；压缩前的消息可查事件及归档 |
+| `patch.diff` | 相对初始提交的 Git 补丁，包含新增、删除和二进制文件 |
+| `run.log` | 可读的运行日志 |
+| `request.json` / `progress.json` | 启动输入与用量检查点；不表示支持会话恢复 |
+
+标准输出只返回一份结果 JSON，过程日志写到标准错误和 `run.log`。`completed` / `achieved` 退出码为 `0`，`failed` / `error` / `goal_error` 为 `1`，`blocked` 为 `2`，`limit` 为 `3`，`timeout` 为 `124`，用户中断为 `130`。
+
+普通停止返回 `completed`；启用 Goal 后，由判断器返回 `achieved` 或 `failed`。这些状态说明 Agent 的运行结果，**不能代替 SWE-bench 官方测试的通过结果**。失败、限额和超时时也尽量导出已有补丁。导出使用临时 Git index，不提交、不重置、不暂存用户的真实工作区。运行会直接修改指定仓库，建议每道题使用独立 checkout 或容器；权限检查本身不是操作系统沙箱。
 
 <details>
 <summary>任务执行示例：Goal、Workflow、队友与后台任务</summary>
@@ -284,7 +335,11 @@ Token 在请求完成后统计，并发在途请求可能使工作流总量超�
 
 ```text
 aki_code/
-├── main.py           # CLI、组件组装与事件投递
+├── main.py           # 交互 CLI 与入口路由
+├── runtime.py        # 两种入口共享的会话组装与生命周期
+├── headless.py       # 单任务执行、工作进程监督与超时
+├── execution.py      # 跨主 Agent / 子 Agent / 辅助调用的限额
+├── artifacts.py      # 运行记录、结果与独立 index 补丁导出
 ├── config.py         # 环境配置
 ├── agent/            # 共享 Harness、一次性子 Agent、回合结果
 ├── tools/            # 编程、任务、团队与工作流工具
@@ -333,6 +388,8 @@ skills/              # 项目提供的技能
 ### 真实 API 联调后的修订
 
 S17 完成后进行真实 API 联调，修复了队友等待审批时误报完成、辅助模型调用输出耗尽、Windows 中文输出解码失败，以及记忆和摘要调用用量漏算等问题。验证范围与结果见第 5 部分。
+
+随后补充非交互 `run` 入口，提取共享 `AgentRuntime`，增加跨调用限额、进程超时监督、独立运行记录和 Git 补丁导出，为后续评测适配提供单任务执行能力。
 
 ## 9. 当前限制与后续计划
 

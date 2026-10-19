@@ -38,8 +38,11 @@ class HookManager:
             event: [] for event in HookEvent
         }
 
-    def register(self, event: HookEvent, callback: HookCallback) -> None:
-        self._hooks[event].append(callback)
+    def register(self, event: HookEvent, callback: HookCallback, *, prepend: bool = False) -> None:
+        if prepend:
+            self._hooks[event].insert(0, callback)
+        else:
+            self._hooks[event].append(callback)
 
     def unregister(self, event: HookEvent, callback: HookCallback) -> None:
         self._hooks[event].remove(callback)

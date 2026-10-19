@@ -172,7 +172,7 @@ class AgentHarness:
             # asked to shut down mid-turn; stop before spending a model call.
             if self.abort_check is not None and self.abort_check():
                 self.hook_manager.fire(HookEvent.TURN_STOPPED, status="interrupted", reason="Agent stopped")
-                return TurnResult(False, status="interrupted", turns=iterations)
+                return TurnResult(False, status="interrupted", reason="Agent stopped", turns=iterations)
             if self.compactor is not None:
                 messages[:] = self.compactor.prepare(messages, active_request)
             # Snapshot the clean pre-call state so a mid-round failure rolls back
@@ -280,7 +280,7 @@ class AgentHarness:
                     self.on_interrupt()
                 if self.reraise_interrupt:
                     raise
-                return TurnResult(False, status="interrupted", turns=iterations)
+                return TurnResult(False, status="interrupted", reason="Interrupted by user", turns=iterations)
             except Exception as e:
                 if (
                     self.compactor is not None

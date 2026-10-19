@@ -10,6 +10,9 @@ class ToolRegistry:
     def register(self, tool: BaseTool) -> None:
         self._tools[tool.name] = tool
 
+    def restrict(self, allowed: set[str]) -> None:
+        self._tools = {name: tool for name, tool in self._tools.items() if name in allowed}
+
     def get_schemas(self) -> list[dict]:
         return [t.to_schema() for t in self._tools.values()]
 

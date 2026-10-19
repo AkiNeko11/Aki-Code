@@ -55,7 +55,7 @@ def ensure_image(client, spec, log_path):
                 if spec.namespace is None:
                     from contextlib import redirect_stderr, redirect_stdout
                     from swebench.harness.docker_build import build_instance_images
-                    # This driver is serial: official builder logs can use cwd.
+                    # The runner isolates each worker's cwd and locks local builds.
                     with redirect_stdout(log), redirect_stderr(log):
                         _, failures = build_instance_images(client, [spec], False, 1)
                     if failures:
@@ -316,13 +316,17 @@ def collect_patch(container, row, attempt):
     return metadata
 
 
-def cleanup_run_containers(client, run_id):
-    """Remove only containers bearing this driver's run ownership label."""
+def cleanup_run_containers(client, run_id, *, instance_id=None):
+    """Clean this run, or only a crashed instance without disturbing its peers."""
+    inference_pattern = (rf"akicode-{re.escape(run_id)}-{re.escape(instance_id)}-attempt-[0-9]{{4,}}"
+                         if instance_id is not None else None)
     for container in client.containers.list(all=True, filters={"label": f"{LABEL}={run_id}"}):
-        container.remove(force=True)
+        if inference_pattern is None or re.fullmatch(inference_pattern, container.name):
+            container.remove(force=True)
     # The official CLI has no custom-label argument. Its unique run_id embeds
     # our ownership nonce; restrict cleanup to that exact generated name form.
-    pattern = rf"sweb\.eval\.[a-z0-9_.-]+\.akicode-{re.escape(run_id)}-[0-9a-f]{{10}}"
+    instance_pattern = re.escape(instance_id.lower()) if instance_id is not None else r"[a-z0-9_.-]+"
+    pattern = rf"sweb\.eval\.{instance_pattern}\.akicode-{re.escape(run_id)}-[0-9a-f]{{10}}"
     for container in client.containers.list(all=True, filters={"name": f"akicode-{run_id}-"}):
         if re.fullmatch(pattern, container.name):
             container.remove(force=True)

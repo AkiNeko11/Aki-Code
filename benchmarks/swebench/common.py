@@ -167,6 +167,7 @@ def summarize(directory, *, save=True):
             predictions.append(read_json(attempt / "prediction.json"))
     total = len(manifest["instance_ids"])
     summary = {"run_id": manifest["run_id"], "mode": manifest["mode"],
+               "workers": manifest.get("workers", 1),
                "updated_at": now(), "selected": total, "counts": dict(counts),
                "agent_statuses": dict(agent_counts), "patch_statuses": dict(patch_counts),
                "evaluation_statuses": dict(evaluation_counts), "resolved": counts["resolved"],

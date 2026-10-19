@@ -1,7 +1,7 @@
-"""Serial inference and official grading, with per-instance resume checkpoints."""
+"""Inference and official grading, with per-instance resume checkpoints."""
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import importlib.metadata
 import json
 import os
@@ -98,6 +98,7 @@ def initialize(args, directory):
     manifest = {
         "schema_version": 2, "run_id": uuid.uuid4().hex[:12], "created_at": now(),
         "mode": args.command, "harness_version": HARNESS_VERSION,
+        "workers": args.workers or 1,
         "driver_sha256": driver_digest(), "source": source,
         "source_sha256": bytes_digest(snapshot), "dataset": dataset,
         "dataset_sha256": digest(directory / "dataset.json"),
@@ -288,8 +289,8 @@ def record_submission(attempt, state, row, manifest):
     return nonempty
 
 
-def process_instance(client, row, manifest, directory, api_key):
-    attempt = next_attempt(directory, row["instance_id"])
+def process_instance(client, row, manifest, directory, api_key, *, attempt=None, update_summary=True):
+    attempt = attempt if attempt is not None else next_attempt(directory, row["instance_id"])
     state = {"instance_id": row["instance_id"], "started_at": now(), "status": "running", "phase": "image",
              "patch_status": "not_collected", "evaluation_status": "not_run"}
     set_state(attempt, state)
@@ -297,8 +298,13 @@ def process_instance(client, row, manifest, directory, api_key):
     preexisting = True
     try:
         spec = test_spec(row, manifest)
-        # Official local builders write logs relative to cwd.
-        with working_directory(attempt):
+        # Local builders share base/environment tags. Serialize their builds
+        # within this run, while remote image pulls and task execution overlap.
+        from filelock import FileLock
+        image_lock = (FileLock(str(directory / ".image-build.lock"))
+                      if manifest["namespace"] is None else nullcontext())
+        # Each parallel worker has its own cwd for the official builder's logs.
+        with image_lock, working_directory(attempt):
             image, preexisting = ensure_image(client, spec, attempt / "image-build.log")
         write_json(attempt / "image.json", {"name": spec.instance_image_key, "id": image.id,
                    "repo_digests": image.attrs.get("RepoDigests", []), "preexisting": preexisting,
@@ -349,13 +355,14 @@ def process_instance(client, row, manifest, directory, api_key):
                 client.images.remove(spec.instance_image_key)
             except Exception as exc:
                 set_state(attempt, state, cleanup_warning=f"Image cleanup failed: {type(exc).__name__}")
-        summarize(directory)
+        if update_summary:
+            summarize(directory)
 
 
 def resume_arguments(args):
     configurable = ("instance_ids", "all", "sample", "revision", "dataset_file", "build_images",
                     "skip_gold", "goal", "cache_level", "max_turns", "max_calls", "max_tokens",
-                    "timeout", "setup_timeout", "eval_timeout")
+                    "timeout", "setup_timeout", "eval_timeout", "workers")
     if any(getattr(args, key) is not None for key in configurable) or args.dataset != "SWE-bench/SWE-bench_Lite" or args.seed != 17:
         raise ValueError("Resume uses the stored selection and configuration. Supply only --output-dir, "
                          "--resume and optionally --retry-errors/--env-file.")
@@ -397,9 +404,13 @@ def run(args):
                 if not api_key:
                     raise ValueError("Set DEEPSEEK_API_KEY via the environment or --env-file.")
                 prepare_wheels(directory)
-            for index, row in pending:
-                say(f"[{index}/{len(rows)}] {row['instance_id']}: starting")
-                process_instance(client, row, manifest, directory, api_key)
+            if manifest.get("workers", 1) > 1:
+                from .parallel import run_parallel
+                run_parallel(pending, manifest, directory, api_key)
+            else:
+                for index, row in pending:
+                    say(f"[{index}/{len(rows)}] {row['instance_id']}: starting")
+                    process_instance(client, row, manifest, directory, api_key)
             return summarize(directory)
         finally:
             try:

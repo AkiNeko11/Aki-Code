@@ -34,6 +34,8 @@ def parser():
         run.add_argument("--env-file", type=Path, default=ROOT / ".env")
         run.add_argument("--resume", action="store_true", help="Use this run's frozen source, dataset and settings")
         run.add_argument("--retry-errors", action="store_true", help="On resume, retry errors/interrupted instances in new attempts")
+        run.add_argument("--workers", type=positive,
+                         help="Concurrent instances in isolated processes (default 1; frozen on resume)")
         selection = run.add_mutually_exclusive_group()
         selection.add_argument("--instance-ids", nargs="+", help="Default: sympy__sympy-20590 only")
         selection.add_argument("--sample", type=positive, help="Deterministic pilot sample, ranked by seed+instance hash")

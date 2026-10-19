@@ -1,6 +1,6 @@
 # SWE-bench Lite 评测驱动
 
-在 Linux Docker 容器中运行 Aki-Code，再使用 **SWE-bench 4.1.0 官方评测器**独立判分。支持单题、固定抽样、全量执行、按题续跑、单独重试判分及用量汇总。驱动串行运行，通过非交互入口启用专用测评权限。
+在 Linux Docker 容器中运行 Aki-Code，再使用 **SWE-bench 4.1.0 官方评测器**独立判分。支持单题、固定抽样、全量执行、按题续跑、单独重试判分及用量汇总。默认串行，通过 `--workers` 开启按题并行，通过非交互入口启用专用测评权限。
 
 默认仅运行 `sympy__sympy-20590`；完整数据集需要显式指定 `--all`。默认先验证参考补丁，验证通过后才调用模型。`run` 会消耗真实 API；`doctor`、`validate`、`grade` 和 `status` 不调用模型。
 
@@ -99,7 +99,7 @@ python -m benchmarks.swebench grade \
 
 本版清单为 `schema_version: 2`。旧版使用 Agent 本地导出的补丁，本版使用 runner 收集的补丁，因此升级后请新建输出目录；旧结果仍可用 `status` 查看，续跑旧结果须切回原 Git 版本。
 
-同一运行目录只允许一个写进程。关闭终端或设备重启后，可以重新激活环境并执行上述续跑命令。长时间运行应使用远程设备支持的持久会话或后台任务方式，避免睡眠中断。
+同一运行目录只允许一个调度进程；并行 worker 各写自己的题目目录，调度进程统一更新汇总。关闭终端或设备重启后，可以重新激活环境并执行上述续跑命令。长时间运行应使用远程设备支持的持久会话或后台任务方式，避免睡眠中断。
 
 ## 4. 小批量与全量
 
@@ -112,6 +112,20 @@ python -m benchmarks.swebench run \
 ```
 
 抽样按 seed 与题目 ID 的 SHA-256 排序，跨 Python 版本保持一致；这不是完整 Lite 成绩。指定题目使用 `--instance-ids ID1 ID2`，与 `--sample`、`--all` 互斥。
+
+两题并行试跑：
+
+```bash
+python -m benchmarks.swebench run \
+  --output-dir .task_outputs/swebench/wsl-parallel-5 \
+  --sample 5 --seed 42 --workers 2
+```
+
+`--workers 2` 表示最多同时运行两道题，任意一道结束后自动补入下一题。每道题的镜像获取、参考验证、Agent 修复和官方判分由独立进程执行，工作目录、容器及日志相互隔离。源码、数据和依赖在调度进程中准备一次，最终统一生成 `summary.json` 和 `predictions.jsonl`。本地构建镜像时，共用基础环境的构建在同一运行内串行进行，题目执行仍可并行。
+
+默认 `--workers 1`；Token、轮数、请求和时间预算都按每题独立计算。并发数保存进清单，`--resume` 时省略 `--workers`，自动沿用原值。修改并发数或升级驱动请新建输出目录。`validate` 也支持此参数；单独的 `grade` 命令保持串行。
+
+中断时调度进程停止分配新题；Linux/macOS 下先给运行中的 worker 共计 20 秒收尾机会，再终止其残留进程并清理本次运行的容器。Windows 宿主直接终止 worker 进程树，再清理容器。worker 异常退出时，先清理该题遗留的容器再补入下一题，其他题目继续执行。已完成题目保留，中断题目可通过 `--resume --retry-errors` 重跑；已有补丁也可以单独 `grade`。强制终止 worker 时仍可能无法完整收集补丁。并发会增加 CPU、内存、带宽和 API 请求压力，不保证耗时按并发数等比下降。
 
 正式运行前固定提交、模型、预算及提示词。完整 Lite `test` 集为 300 题：
 
@@ -169,7 +183,7 @@ Agent 的 `completed` 不代表解题成功；官方 `resolved=true` 才计为�
 - 主执行入口仍是 `python -m aki_code.main run`；本驱动只负责环境、调度、补丁转换和官方判分。
 - 使用固定版本的官方评测逻辑，不提供自定义“通过”判定。修改配置使用新运行，失败和复测均保留记录。
 - 题目镜像目前通过官方 tag 获取，每题记录实际 ID/digest；跨时间重新开始的运行仍可能获得更新的镜像。严格复现时还需保留原镜像或按记录恢复。
-- 已支持 x86_64 Linux，Apple Silicon 需要通过实际迁移试跑。没有提供原生 ARM 或并行执行的兼容性保证。
+- 使用 x86_64 Linux 容器；Apple Silicon 的兼容执行和并发资源占用需要在目标设备试跑。未提供原生 ARM 镜像执行路径。
 - 权限规则不是操作系统沙箱。推理在独立容器中进行，无宿主工作区、Key 文件或 Docker socket 挂载；容器进程仍持有调用模型所需的 Key，并可访问网络。
 
 参考：[官方评测流程](https://www.swebench.com/SWE-bench/guides/evaluation/)、[4.1.0 安装及平台说明](https://github.com/SWE-bench/SWE-bench/blob/v4.1.0/README.md)、[Docker 虚拟机与架构兼容设置](https://docs.docker.com/desktop/features/vmm/)。

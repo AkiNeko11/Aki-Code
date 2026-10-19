@@ -206,6 +206,8 @@ python -m benchmarks.swebench run --output-dir .task_outputs/swebench/smoke
 
 默认仅验证并运行 `sympy__sympy-20590`，会调用真实 API；完整 300 题需要显式指定 `--all`。运行记录和补丁保存到输出目录，`summary.json` 中的官方解决率以本次选中全部题目为分母。Apple Silicon 使用 x86_64 Linux 镜像兼容执行，需要在目标设备先做单题验证。
 
+SWE-bench 默认预算为每题主 Agent 60 轮、全部模型请求 80 次、1,000,000 Token 软阈值，Agent 执行时限为 600 秒；可用命令行参数覆盖。预算写入新运行的清单，续跑沿用原运行保存的配置。
+
 测评模式允许在题目工作区和专用临时目录中开展修复，权限拒绝先作为工具结果反馈给模型，连续三次同类拒绝才停止。Agent 停止后，外部 runner 独立收集 Git 改动，不依赖模型生成补丁或 Agent 写出结果文件；汇总分别记录 Agent 状态、补丁状态和官方判分。普通非交互入口仍默认自行导出补丁。此版测评清单升级为 v2，请使用新的输出目录，旧结果可继续只读查看。
 
 <details>

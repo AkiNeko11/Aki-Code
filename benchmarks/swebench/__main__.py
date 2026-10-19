@@ -48,9 +48,9 @@ def parser():
                          help="Default env: remove instance images acquired by this run; preserve existing images")
         run.add_argument("--setup-timeout", type=positive, help="Seconds per setup step (default 1800)")
         run.add_argument("--eval-timeout", type=positive, help="Official test timeout per instance (default 1800)")
-        run.add_argument("--max-turns", type=positive, help="Lead Agent turns (default 30)")
-        run.add_argument("--max-calls", type=positive, help="All model request attempts (default 40)")
-        run.add_argument("--max-tokens", type=positive, help="Aggregate token soft threshold (default 300000)")
+        run.add_argument("--max-turns", type=positive, help="Lead Agent turns (default 60)")
+        run.add_argument("--max-calls", type=positive, help="All model request attempts (default 80)")
+        run.add_argument("--max-tokens", type=positive, help="Aggregate token soft threshold (default 1000000)")
         run.add_argument("--timeout", type=positive, help="Agent wall-clock seconds, excluding setup (default 600)")
         run.add_argument("--goal", help="Optional Goal condition; disabled in the baseline")
         run.add_argument("--skip-gold", action="store_true", default=None,

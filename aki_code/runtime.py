@@ -82,7 +82,12 @@ class AgentRuntime:
         state_dir = Path(state_dir).resolve() if state_dir is not None else None
         def state_path(name, configured):
             return state_dir / name if state_dir is not None else configured
-        permission_manager = PermissionManager(allowed_dirs=[str(workspace)], base_dir=workspace, mode=permission_mode)
+        readable_dirs = [state_path("transcripts", config.TRANSCRIPTS_DIR),
+                         state_path("tool-results", config.TOOL_OUTPUTS_DIR)] if coding else []
+        permission_manager = PermissionManager(
+            allowed_dirs=[str(workspace)], base_dir=workspace, mode=permission_mode,
+            readable_dirs=readable_dirs,
+        )
 
         settings = SessionSettings(show_hooks=not coding)
         hook_manager = HookManager()
@@ -292,7 +297,11 @@ class AgentRuntime:
                     "Run verification commands directly so the tool's exit code reflects "
                     "the actual test process; avoid appending echo or other commands that "
                     "mask failure. Leave code changes in the working tree for patch export; "
-                    "do not stage, commit, reset or change Git history."
+                    "do not stage, commit, reset or change Git history. "
+                    "Runtime archives referenced in tool results are read-only. "
+                    "Use glob to list them and read_file with an exact path, offset "
+                    "and a small limit (for example 100 lines) to inspect them. "
+                    "Shell access to those archives is denied."
                 )
             return prompt
 

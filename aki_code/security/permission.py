@@ -100,6 +100,7 @@ class PermissionManager:
         allowed_dirs: list[str] | None = None,
         base_dir: str | Path | None = None,
         mode: PermissionMode = PermissionMode.DEFAULT,
+        readable_dirs: list[str | Path] | None = None,
     ):
         if allowed_dirs:
             self.allowed_dirs = [Path(d).expanduser().resolve() for d in allowed_dirs]
@@ -112,6 +113,7 @@ class PermissionManager:
             self.base_dir = Path(os.getcwd()).resolve()
 
         self.mode = mode
+        self.readable_dirs = [Path(d).expanduser().resolve() for d in readable_dirs or []]
 
     # ── Path helpers ──────────────────────────────────────────
 
@@ -135,6 +137,13 @@ class PermissionManager:
             return False
         return any(self._is_subpath(p, d) for d in self.allowed_dirs)
 
+    def _is_readable_artifact(self, path_str: str) -> bool:
+        try:
+            path = self._resolve_path(path_str)
+        except (OSError, ValueError):
+            return False
+        return any(self._is_subpath(path, directory) for directory in self.readable_dirs)
+
     # ── Path extraction ───────────────────────────────────────
 
     def _extract_paths_from_args(self, tool_name: str, args: dict) -> list[str]:
@@ -146,20 +155,29 @@ class PermissionManager:
             "glob": ["path"],
         }
         keys = path_keys.get(tool_name, [])
-        return [args[k] for k in keys if k in args and args[k]]
+        paths = [args[k] for k in keys if k in args and args[k]]
+        if tool_name == "glob" and isinstance(args.get("pattern"), str):
+            # The pattern itself can be absolute or contain '..', so checking
+            # only the search directory would allow it to escape that scope.
+            paths.append(os.path.join(args.get("path") or ".", args["pattern"]))
+        return paths
 
     def _extract_bash_paths(self, command: str) -> list[str]:
         paths = []
+        # Keep quoted paths together and stop unquoted paths at shell operators.
+        # In particular, /dev/null; is the sink followed by a command separator.
+        target = r"""("[^"]*"|'[^']*'|[^\s;&|<>]+)"""
         for match in re.finditer(
-            r"(?:cat|less|more|head|tail|vim|nano|vi|open|mkdir|type)\s+(?:-\S+\s+)*(\S+)",
+            r"(?:cat|less|more|head|tail|vim|nano|vi|open|mkdir|type)\s+(?:-\S+\s+)*" + target,
             command,
         ):
-            paths.append(match.group(1))
+            paths.append(match.group(1).strip("'\""))
 
         _SYSTEM_SINKS = {"/dev/null", "/dev/stdout", "/dev/stderr", "nul"}
-        for match in re.finditer(r"(?:\d*>>|\d*>)\s*(\S+)", command):
-            if match.group(1) not in _SYSTEM_SINKS:
-                paths.append(match.group(1))
+        for match in re.finditer(r"(?:\d*>>|\d*>)\s*" + target, command):
+            path = match.group(1).strip("'\"")
+            if path.casefold() not in _SYSTEM_SINKS:
+                paths.append(path)
         return paths
 
     # ── Main check ────────────────────────────────────────────
@@ -180,6 +198,13 @@ class PermissionManager:
             paths += self._extract_bash_paths(args.get("command", ""))
 
         for p in paths:
+            if self._is_readable_artifact(p):
+                if tool_name in {"read_file", "glob"}:
+                    continue
+                return "deny", (
+                    "Runtime archives are read-only. Use glob to list files and "
+                    "read_file with an exact path, offset and limit to inspect them."
+                )
             if not self._is_path_safe(p):
                 return "ask", f"Path outside allowed directories: {p}"
 

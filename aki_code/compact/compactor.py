@@ -156,6 +156,7 @@ class Compactor:
         preview = content[: self.large_result_preview]
         return (
             f"[Large tool result saved at {path}]\n"
+            "Use read_file with this exact path, offset and limit to inspect more.\n"
             f"Preview (first {self.large_result_preview} chars):\n{preview}"
         )
 
@@ -263,6 +264,7 @@ class Compactor:
             preview = content[: self.fit_result_preview_chars]
             block["content"] = (
                 f"[Tool result saved at {saved_path}]\n"
+                "Use read_file with this exact path, offset and limit to inspect more.\n"
                 f"Preview (first {self.fit_result_preview_chars} chars):\n{preview}"
             )
         return messages

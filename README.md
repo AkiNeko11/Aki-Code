@@ -82,6 +82,8 @@ Skills 按需读取；记忆从磁盘选择性召回；大工具结果和历史�
 
 同日完成 WSL Ubuntu 26.04 / Python 3.14.4 验证：28 项离线回归与 14 项针对性检查通过，真实 API 覆盖子 Agent、后台测试、Goal 和补丁重放。随后使用 SWE-bench 4.1.0，在 Docker 中跑通 Lite 的 `sympy__sympy-20590`：Agent 正常结束，官方判定 `resolved: true`，1 项 FAIL_TO_PASS 和 21 项 PASS_TO_PASS 全部通过。最终运行使用 12 次模型请求、108,386 Token，Goal 关闭。该题经过环境调试和运行时修复后的复测，仅用于验证单题链路，不构成固定配置下的全量评测成绩。临时驱动已清理，报告、日志和补丁保留在本地 `.task_outputs/wsl-20261019/`。
 
+随后补充可保留的 SWE-bench 评测驱动，29 项临时回归检查通过。使用新驱动再次完成该题的真实 API 与官方判分：Agent 触及 300,000 Token 软阈值，以 `limit` 结束，已导出的补丁仍获得官方 `resolved: true`，1 项 FAIL_TO_PASS 和 21 项 PASS_TO_PASS 全部通过；本次使用 28 次模型请求、303,868 Token。另验证了不调用模型的补丁判分恢复与按题续跑。以上仍是同一道题的开发验证，不能作为全量成绩或 pass@1 结果；Apple Silicon 迁移尚未验证。
+
 ## 6. 快速开始
 
 需要 **Python 3.10+** 和可用的 DeepSeek API Key。使用 Git worktree 功能时，需要在 Git 仓库中运行。
@@ -188,6 +190,19 @@ Linux / WSL 使用相同参数，例如：
 标准输出只返回一份结果 JSON，过程日志写到标准错误和 `run.log`。`completed` / `achieved` 退出码为 `0`，`failed` / `error` / `goal_error` 为 `1`，`blocked` 为 `2`，`limit` 为 `3`，`timeout` 为 `124`，用户中断为 `130`。
 
 普通停止返回 `completed`；启用 Goal 后，由判断器返回 `achieved` 或 `failed`。这些状态说明 Agent 的运行结果，**不能代替 SWE-bench 官方测试的通过结果**。失败、限额和超时时也尽量导出已有补丁。导出使用临时 Git index，不提交、不重置、不暂存用户的真实工作区。运行会直接修改指定仓库，建议每道题使用独立 checkout 或容器；权限检查本身不是操作系统沙箱。
+
+### SWE-bench Lite 评测
+
+仓库提供独立的 [SWE-bench 评测驱动](benchmarks/swebench/README.md)，使用固定的官方评测器，在 Linux Docker 容器中运行 Agent 并独立判分。支持单题、固定抽样、全量执行、按题续跑和单独重试判分。MacBook / Mac mini 的安装、Docker 架构要求和完整操作步骤见该文档。
+
+安装评测依赖并配置 API 后，在项目根目录执行：
+
+```bash
+python -m benchmarks.swebench doctor
+python -m benchmarks.swebench run --output-dir .task_outputs/swebench/smoke
+```
+
+默认仅验证并运行 `sympy__sympy-20590`，会调用真实 API；完整 300 题需要显式指定 `--all`。运行记录和补丁保存到输出目录，`summary.json` 中的官方解决率以本次选中全部题目为分母。Apple Silicon 使用 x86_64 Linux 镜像兼容执行，需要在目标设备先做单题验证。
 
 <details>
 <summary>任务执行示例：Goal、Workflow、队友与后台任务</summary>
@@ -397,6 +412,8 @@ S17 完成后进行真实 API 联调，修复了队友等待审批时误报完�
 
 Linux 与 SWE-bench 单题联调进一步修复了归档输出被误判为越界访问，以及 Shell 重定向后的分隔符被计入路径的问题；增加归档只读取回、文件分页读取，并检查路径搜索模式的访问范围。
 
+评测适配独立放在 `benchmarks/swebench/`，通过现有非交互入口连接 Docker 题目环境与官方判分器，提供源码和数据快照、单题与串行批量执行、按题续跑、判分恢复及完整选择集统计。
+
 ## 9. 当前限制与后续计划
 
 ### 当前限制
@@ -405,7 +422,7 @@ Linux 与 SWE-bench 单题联调进一步修复了归档输出被误判为越界
 - **执行环境**：Shell 命令在宿主机执行。路径与命令规则提供权限检查，未提供操作系统级隔离。
 - **工作流审查**：仅执行受限只读审查，不运行测试；不同标题描述同一缺陷时，仍可能存在语义重复。
 - **持久化**：支持任务、记忆、持久化 cron 定义和工作流结果落盘，完整对话及 Goal 尚无 CLI 自动恢复。
-- **评测**：已完成 SWE-bench Lite 单题 Docker 验证，尚无 300 题全量成绩；批量适配与结果统计是后续工作。当前验证环境为 x86_64 Linux，Apple Silicon 的 ARM 环境仍需单独验证。
+- **评测**：已完成 SWE-bench Lite 单题 Docker 验证，提供串行批量驱动、按题续跑和结果统计，尚无 300 题全量成绩。当前验证环境为 x86_64 Linux，Apple Silicon 上的 x86_64 镜像兼容执行仍需在目标设备验证。
 
 ### 后续计划
 

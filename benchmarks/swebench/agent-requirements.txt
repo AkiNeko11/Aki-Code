@@ -1,0 +1,4 @@
+# Installed offline in an independent Python 3.11 environment in each container.
+anthropic==1.15.0
+python-dotenv==1.2.4
+rich==15.0.0

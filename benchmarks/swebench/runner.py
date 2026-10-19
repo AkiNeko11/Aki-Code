@@ -96,7 +96,7 @@ def initialize(args, directory):
     (directory / "agent-requirements.txt").write_bytes(requirement)
     write_json(directory / "dataset.json", rows)
     manifest = {
-        "schema_version": 1, "run_id": uuid.uuid4().hex[:12], "created_at": now(),
+        "schema_version": 2, "run_id": uuid.uuid4().hex[:12], "created_at": now(),
         "mode": args.command, "harness_version": HARNESS_VERSION,
         "driver_sha256": driver_digest(), "source": source,
         "source_sha256": bytes_digest(snapshot), "dataset": dataset,
@@ -106,6 +106,8 @@ def initialize(args, directory):
         "platform": "linux/amd64", "namespace": None if args.build_images else "swebench",
         "cache_level": args.cache_level or "env", "environment": environment,
         "goal": args.goal, "validate_gold": args.command == "validate" or not args.skip_gold,
+        "execution_profile": "benchmark", "patch_collection": "runner",
+        "permission_denial_limit": 3,
         "limits": {"max_turns": args.max_turns or 30, "max_calls": args.max_calls or 40,
                    "max_tokens": args.max_tokens or 300000, "timeout": args.timeout or 600},
         "setup_timeout": args.setup_timeout or 1800, "eval_timeout": args.eval_timeout or 1800,
@@ -122,8 +124,9 @@ def initialize(args, directory):
 
 def load_manifest(directory):
     manifest = read_json(directory / "manifest.json")
-    if manifest.get("schema_version") != 1:
-        raise ValueError("Unsupported benchmark manifest version.")
+    if manifest.get("schema_version") != 2:
+        raise ValueError("This driver uses runner-owned patches (manifest v2). "
+                         "Start a new output directory, or use the original Git version for old runs.")
     if manifest["driver_sha256"] != driver_digest():
         raise ValueError("Benchmark driver changed. Use the original Git version to resume, "
                          "or start a new output directory.")
@@ -227,25 +230,68 @@ def set_state(attempt, state, **changes):
     write_json(attempt / "state.json", state)
 
 
-def submission(attempt, row, manifest):
+def agent_result(attempt, row):
     result_path = attempt / "agent" / "run" / "result.json"
-    if not result_path.exists():
-        raise RuntimeError("Agent returned no result.json; see agent-console.log.")
-    result = read_json(result_path)
-    if result.get("base_commit") != row["base_commit"]:
-        raise ValueError("Agent result does not match the expected base_commit.")
-    patch_path = attempt / "agent" / "run" / "patch.diff"
-    if not result.get("patch_exported") or not patch_path.exists():
-        raise RuntimeError("Agent did not export a patch; see agent/run/result.json.")
+    if result_path.exists():
+        result = read_json(result_path)
+        if result.get("base_commit") != row["base_commit"]:
+            raise ValueError("Agent result does not match the expected base_commit.")
+    else:
+        progress = attempt / "agent" / "run" / "progress.json"
+        result = read_json(progress) if progress.exists() else {}
+        execution_path = attempt / "execution.json"
+        execution = read_json(execution_path) if execution_path.exists() else {}
+        status = execution.get("status", "error")
+        status = (status if status in {"timeout", "interrupted"} else "error") if execution.get(
+            "agent_started", True) else "not_started"
+        result.update(status=status,
+                      reason=execution.get("reason") or "Agent returned no result.json; see agent-console.log.",
+                      result_available=False)
+    return result
+
+
+def submission(attempt, row, manifest):
+    # The trusted runner's artifact is authoritative even if the Agent process
+    # timed out or died before writing its own result.json.
+    metadata_path = attempt / "patch.json"
+    patch_path = attempt / "patch.diff"
+    if not metadata_path.exists():
+        raise RuntimeError("Runner collected no usable patch; see inference-error.log.")
+    metadata = read_json(metadata_path)
+    if (metadata.get("collector") != "runner" or metadata.get("base_commit") != row["base_commit"]
+            or metadata.get("status") not in {"empty", "nonempty"}):
+        raise ValueError(f"Runner patch is unavailable or invalid: {metadata.get('reason', '')}")
+    if not patch_path.exists():
+        raise ValueError("Runner patch file is missing.")
+    patch_hash = digest(patch_path)
+    if metadata.get("bytes") != patch_path.stat().st_size or metadata.get("sha256") != patch_hash:
+        raise ValueError("Runner patch changed after collection. Start a new run.")
+    nonempty = bool(patch_path.stat().st_size)
+    if nonempty != (metadata["status"] == "nonempty"):
+        raise ValueError("Runner patch status does not match its contents.")
+    result = agent_result(attempt, row)
     patch = patch_path.read_text(encoding="utf-8")
     write_json(attempt / "prediction.json", {"instance_id": row["instance_id"],
                                             "model_name_or_path": "akicode", "model_patch": patch})
-    return result, digest(patch_path), bool(patch.strip())
+    return result, patch_hash, nonempty
+
+
+def record_submission(attempt, state, row, manifest):
+    set_state(attempt, state, agent=agent_result(attempt, row))
+    result, patch_hash, nonempty = submission(attempt, row, manifest)
+    set_state(attempt, state, agent=result, patch_sha256=patch_hash,
+              patch_status="nonempty" if nonempty else "empty", phase="grading",
+              evaluation_status="running" if nonempty else "not_run")
+    if not nonempty:
+        set_state(attempt, state, status="empty_patch", phase="finished",
+                  reason=result.get("reason") or "Runner collected no working-tree changes.")
+    return nonempty
 
 
 def process_instance(client, row, manifest, directory, api_key):
     attempt = next_attempt(directory, row["instance_id"])
-    state = {"instance_id": row["instance_id"], "started_at": now(), "status": "running", "phase": "image"}
+    state = {"instance_id": row["instance_id"], "started_at": now(), "status": "running", "phase": "image",
+             "patch_status": "not_collected", "evaluation_status": "not_run"}
     set_state(attempt, state)
     image = None
     preexisting = True
@@ -269,19 +315,32 @@ def process_instance(client, row, manifest, directory, api_key):
             set_state(attempt, state, status="validated", phase="finished")
             return
         set_state(attempt, state, phase="agent")
-        infer(client, image, row, manifest, directory, attempt, api_key)
-        result, patch_hash, nonempty = submission(attempt, row, manifest)
-        set_state(attempt, state, agent=result, patch_sha256=patch_hash, phase="grading")
-        if nonempty:
+        try:
+            infer(client, image, row, manifest, directory, attempt, api_key)
+        except Exception as exc:
+            # infer's finally block still tries to collect while the disposable
+            # container exists. A valid partial patch can be graded independently.
+            set_state(attempt, state, inference_error=f"{type(exc).__name__}: {exc}")
+        set_state(attempt, state, phase="collection")
+        if record_submission(attempt, state, row, manifest):
             verdict = grade_patch(directory, attempt, row, manifest)
             set_state(attempt, state, evaluation=verdict,
-                      status="resolved" if verdict["resolved"] else "unresolved", phase="finished")
-        else:
-            set_state(attempt, state, status="empty_patch", phase="finished")
+                      status="resolved" if verdict["resolved"] else "unresolved",
+                      evaluation_status="resolved" if verdict["resolved"] else "unresolved", phase="finished")
     except KeyboardInterrupt:
+        if (attempt / "patch.json").exists():
+            state["patch_status"] = read_json(attempt / "patch.json")["status"]
+        if (attempt / "execution.json").exists():
+            state["agent"] = agent_result(attempt, row)
+        if state["evaluation_status"] == "running":
+            state["evaluation_status"] = "interrupted"
         set_state(attempt, state, status="interrupted", reason="Interrupted by user.")
         raise
     except Exception as exc:
+        if state["phase"] == "grading":
+            state["evaluation_status"] = "error"
+        if state["phase"] == "collection":
+            state["patch_status"] = "unavailable"
         set_state(attempt, state, status="error", reason=f"{type(exc).__name__}: {exc}")
         say(f"  {row['instance_id']}: {state['reason']}")
     finally:
@@ -360,21 +419,18 @@ def grade(args):
     with FileLock(str(directory / ".lock"), timeout=0):
         for row in read_json(directory / "dataset.json"):
             attempt = latest_attempt(directory, row["instance_id"])
-            if not attempt or not (attempt / "agent" / "run" / "result.json").exists():
+            if not attempt or not (attempt / "patch.json").exists():
                 continue
             state = read_json(attempt / "state.json")
             if state["status"] in {"resolved", "unresolved", "empty_patch"}:
                 continue
-            patch = attempt / "agent" / "run" / "patch.diff"
+            patch = attempt / "patch.diff"
             if state.get("patch_sha256") and digest(patch) != state["patch_sha256"]:
                 raise ValueError("Submission changed; start a new run instead of mixing results.")
             image = client = None
             preexisting = True
             try:
-                result, patch_hash, nonempty = submission(attempt, row, manifest)
-                set_state(attempt, state, agent=result, patch_sha256=patch_hash, phase="grading")
-                if not nonempty:
-                    set_state(attempt, state, status="empty_patch", phase="finished", reason="")
+                if not record_submission(attempt, state, row, manifest):
                     continue
                 client = docker_client()
                 cleanup_run_containers(client, manifest["run_id"])
@@ -383,12 +439,15 @@ def grade(args):
                     image, preexisting = ensure_image(client, spec, attempt / "grade-image.log")
                 verdict = grade_patch(directory, attempt, row, manifest)
                 set_state(attempt, state, evaluation=verdict, phase="finished", reason="",
-                          status="resolved" if verdict["resolved"] else "unresolved")
+                          status="resolved" if verdict["resolved"] else "unresolved",
+                          evaluation_status="resolved" if verdict["resolved"] else "unresolved")
             except KeyboardInterrupt:
-                set_state(attempt, state, status="interrupted", reason="Grading interrupted.")
+                set_state(attempt, state, status="interrupted", reason="Grading interrupted.",
+                          evaluation_status="interrupted")
                 raise
             except Exception as exc:
-                set_state(attempt, state, status="error", reason=f"{type(exc).__name__}: {exc}")
+                set_state(attempt, state, status="error", reason=f"{type(exc).__name__}: {exc}",
+                          evaluation_status="error" if state.get("phase") == "grading" else "not_run")
             finally:
                 try:
                     if image is not None and not preexisting and manifest["cache_level"] == "env":

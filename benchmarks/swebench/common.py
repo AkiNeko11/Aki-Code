@@ -108,7 +108,8 @@ def task_text(row):
     return ("Fix the following issue in the repository at /testbed. Inspect the code, "
             "implement a minimal general fix, and run relevant verification using the "
             "repository's existing test environment. Do not change existing tests to "
-            "make them pass. The exported Git patch is your submission.\n\n"
+            "make them pass. The external runner collects your final Git changes; "
+            "do not write a patch file yourself.\n\n"
             "Issue description:\n" + row["problem_statement"] + "\n")
 
 
@@ -119,7 +120,7 @@ def latest_attempt(directory, instance_id):
 
 def summarize(directory, *, save=True):
     manifest = read_json(directory / "manifest.json")
-    counts, agent_counts = Counter(), Counter()
+    counts, agent_counts, patch_counts, evaluation_counts = Counter(), Counter(), Counter(), Counter()
     rows, predictions = [], []
     calls = tokens = references = 0
     elapsed = 0.0
@@ -131,6 +132,13 @@ def summarize(directory, *, save=True):
         result = state.get("agent", {})
         if result:
             agent_counts[result.get("status", "unknown")] += 1
+        patch_status = state.get("patch_status", "nonempty" if state.get("patch_sha256") and
+                                 state["status"] != "empty_patch" else "empty" if
+                                 state["status"] == "empty_patch" else "not_collected")
+        evaluation_status = state.get("evaluation_status", state["status"] if
+                                      "evaluation" in state else "not_run")
+        patch_counts[patch_status] += 1
+        evaluation_counts[evaluation_status] += 1
         row_calls = row_tokens = 0
         # Keep costs from interrupted/error attempts instead of hiding retries.
         for old in (directory / "instances" / instance_id).glob("attempt-*/agent/run"):
@@ -148,7 +156,10 @@ def summarize(directory, *, save=True):
         tokens += row_tokens
         rows.append({"instance_id": instance_id, "status": state["status"],
                      "phase": state.get("phase"),
-                     "agent_status": result.get("status"), "reason": state.get("reason", ""),
+                     "agent_status": result.get("status"), "agent_reason": result.get("reason", ""),
+                     "patch_status": patch_status, "evaluation_status": evaluation_status,
+                     "reason": state.get("reason") or result.get("reason") or state.get("inference_error", ""),
+                     "inference_error": state.get("inference_error", ""),
                      "attempt": str(attempt.relative_to(directory)) if attempt else None,
                      "agent_elapsed_seconds": result.get("elapsed_seconds"),
                      "request_attempts": row_calls, "total_tokens": row_tokens})
@@ -157,7 +168,8 @@ def summarize(directory, *, save=True):
     total = len(manifest["instance_ids"])
     summary = {"run_id": manifest["run_id"], "mode": manifest["mode"],
                "updated_at": now(), "selected": total, "counts": dict(counts),
-               "agent_statuses": dict(agent_counts), "resolved": counts["resolved"],
+               "agent_statuses": dict(agent_counts), "patch_statuses": dict(patch_counts),
+               "evaluation_statuses": dict(evaluation_counts), "resolved": counts["resolved"],
                "resolved_rate": counts["resolved"] / total if manifest["mode"] == "run" else None,
                "reference_validated": references, "agent_elapsed_seconds": round(elapsed, 3),
                "request_attempts": calls, "total_tokens": tokens, "instances": rows}

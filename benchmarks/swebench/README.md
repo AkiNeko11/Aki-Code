@@ -1,6 +1,6 @@
 # SWE-bench Lite 评测驱动
 
-在 Linux Docker 容器中运行 Aki-Code，再使用 **SWE-bench 4.1.0 官方评测器**独立判分。支持单题、固定抽样、全量执行、按题续跑、单独重试判分及用量汇总。驱动串行运行，不修改 Agent 主体。
+在 Linux Docker 容器中运行 Aki-Code，再使用 **SWE-bench 4.1.0 官方评测器**独立判分。支持单题、固定抽样、全量执行、按题续跑、单独重试判分及用量汇总。驱动串行运行，通过非交互入口启用专用测评权限。
 
 默认仅运行 `sympy__sympy-20590`；完整数据集需要显式指定 `--all`。默认先验证参考补丁，验证通过后才调用模型。`run` 会消耗真实 API；`doctor`、`validate`、`grade` 和 `status` 不调用模型。
 
@@ -44,9 +44,11 @@ python -m benchmarks.swebench run \
 2. 固定 Agent 源码、模型与上下文配置，下载一次 Linux / Python 3.11 的 Agent 依赖 wheel。
 3. 获取该题的 x86_64 镜像，在全新容器中用官方参考补丁验证环境。
 4. 在另一个全新容器中把仓库还原到题目指定的 `base_commit`，运行 Aki-Code。
-5. 导出补丁，在全新容器中使用官方测试判分，保存官方报告和汇总。
+5. Agent 停止后，由外部 runner 停止残留任务、收集相对 `base_commit` 的 Git 改动，再在全新容器中使用官方测试判分，保存官方报告和汇总。
 
 Agent 只收到问题描述和统一修复要求，不收到参考补丁、官方测试补丁、评分测试 ID 或历史运行结果。完整数据快照保存在宿主机，宿主目录和 Docker socket 不挂载给 Agent。Agent 自身使用独立的 Python 3.11 环境，执行仓库命令时优先使用该题 `testbed` 环境。
+
+测评中可修改 `/testbed`，复现脚本、下载的检查材料和测试日志放在 `/tmp/akicode-task`，`TMPDIR` 指向该目录。运行记录及最终补丁由 runner 管理，模型使用 `git diff` 查看当前修改；已有工具归档仍只能用 `glob` / `read_file` 只读取回。禁止的操作返回拒绝原因和允许目录，交给模型选择其他操作；连续三次同工具、同原因的拒绝使运行以 `blocked` 停止。成功获得许可的工具调用会重置该计数，全局调用、Token、时间限额继续生效。需要其他审批的命令也返回拒绝，不自动放宽权限。普通交互和默认非交互运行沿用原有权限行为。
 
 也可以先单独验证参考补丁，不配置 API Key：
 
@@ -57,7 +59,7 @@ python -m benchmarks.swebench validate \
 
 `validate` 的成功只表示参考补丁通过，不计为 Agent 解题成功。参考验证和 Agent 试跑使用不同输出目录。
 
-默认预算为主 Agent 30 轮、全部模型请求 40 次、300,000 Token 软阈值、Agent 执行 600 秒；每个环境准备步骤和官方测试分别限制为 1800 秒。Agent 时限不包括下载和依赖准备。外层额外留出 60 秒用于 Agent 收尾，超时后终止整个推理容器。Token 包含缓存输入；在途请求可能超出软阈值。
+默认预算为主 Agent 30 轮、全部模型请求 40 次、300,000 Token 软阈值、Agent 执行 600 秒；每个环境准备步骤和官方测试分别限制为 1800 秒。Agent 时限不包括下载和依赖准备。外层额外留出 60 秒用于 Agent 收尾；超时后先终止任务进程，尽量保留容器用于收集补丁，随后移除容器。容器已退出、Docker 不可用或无法停止残留任务时，补丁收集可能失败，会记录为 `unavailable`，不会伪装成空补丁。Token 包含缓存输入；在途请求可能超出软阈值。
 
 Mac 上如需更长时限，先在新的试跑目录中调整，再固定正式配置：
 
@@ -86,7 +88,7 @@ python -m benchmarks.swebench run \
 
 重试保留旧 attempt，并把它的模型用量计入总消耗。不要把多次尝试中成功的一次直接标为 pass@1。已完成但未解决的题目不会自动再试。
 
-如果 Agent 已导出补丁，只有官方判分失败，可以只重试判分，避免再次调用模型：
+如果 runner 已收集有效补丁，只有官方判分失败或尚未进行，可以只重试判分，避免再次调用模型。即使 Agent 未能写出自己的 `result.json`，仍可使用已收集并校验的补丁：
 
 ```bash
 python -m benchmarks.swebench grade \
@@ -94,6 +96,8 @@ python -m benchmarks.swebench grade \
 ```
 
 每次判分使用新的官方 `run_id` 和日志目录，避免旧结果缓存。已有成功判分会被跳过；修改补丁、运行配置或 benchmark 驱动后，应创建新的运行。更新 Agent 主体源码后，旧运行仍使用原先保存的 Agent 源码快照。
+
+本版清单为 `schema_version: 2`。旧版使用 Agent 本地导出的补丁，本版使用 runner 收集的补丁，因此升级后请新建输出目录；旧结果仍可用 `status` 查看，续跑旧结果须切回原 Git 版本。
 
 同一运行目录只允许一个写进程。关闭终端或设备重启后，可以重新激活环境并执行上述续跑命令。长时间运行应使用远程设备支持的持久会话或后台任务方式，避免睡眠中断。
 
@@ -123,7 +127,7 @@ python -m benchmarks.swebench run \
 
 没有全局 prune 操作，不删除其他任务的容器或镜像。中断后会清理当前运行有所有权标签的推理容器，以及当前判分的确切容器。强制杀死宿主进程可能留下镜像或官方判分容器，需要根据该运行的日志确认并清理。
 
-如果 Docker Hub 预构建镜像不可用，可在新运行中加 `--build-images`，调用官方构建器本地构建；该路径依赖项目的历史依赖源可用，通常更慢。镜像下载或构建失败的详情见题目 attempt 下的 `image-build.log`。修改镜像来源后使用新运行，保留原失败记录。
+如果 Docker Hub 预构建镜像不可用，可在新运行中加 `--build-images`，调用官方构建器本地构建；该路径依赖项目的历史依赖源可用，通常更慢。`image-build.log` 从首次查询本地镜像开始记录阶段与完整异常；Docker 连接中断、连接超时及部分 5xx 服务错误最多尝试三次。鉴权、镜像不存在和本地构建失败不自动重试。修改镜像来源后使用新运行，保留原失败记录。
 
 ## 5. 产物与统计口径
 
@@ -142,15 +146,19 @@ python -m benchmarks.swebench run \
     image.json           # 镜像 ID、digest、架构
     prepare.log
     agent-console.log
-    agent/run/           # result、messages、events、patch、日志及归档
+    execution.json       # 外部进程执行状态；Agent 无结果时仍保留原因
+    patch.diff           # runner 从工作区独立收集的提交补丁
+    patch.json           # base_commit、收集状态、字节数和 SHA-256
+    patch-collection.log # 补丁收集的 stderr，与补丁正文分离
+    agent/run/           # Agent 的 result、messages、events、日志及归档
     prediction.json
     gold/<唯一编号>/     # 独立参考验证日志
     grading/<唯一编号>/  # 官方 report.json、测试输出及过程日志
 ```
 
-`summary.json` 的 `resolved_rate` 分母始终是本次选中的全部题目；环境失败、缺少补丁、Agent 失败不会从分母消失。`counts` 区分 `pending`、`running`、`resolved`、`unresolved`、`empty_patch`、`error`、`interrupted`；`agent_statuses` 另存 Agent 状态。参考验证使用 `validated`，不计入解决数量。
+`summary.json` 的 `resolved_rate` 分母始终是本次选中的全部题目；环境失败、缺少补丁、Agent 失败不会从分母消失。`counts` 区分 `pending`、`running`、`resolved`、`unresolved`、`empty_patch`、`error`、`interrupted`。`agent_statuses`、`patch_statuses`、`evaluation_statuses` 分别记录 Agent 运行、补丁收集和官方判分；题目条目保留 `agent_reason` 和异常原因。参考验证使用 `validated`，不计入解决数量。
 
-Agent 的 `completed` 不代表解题成功；官方 `resolved=true` 才计为解决。Agent 限额或失败时如果仍导出有效补丁，也会交给官方测试。汇总的请求数/Token 累计所有已保存的 attempt；若进程在请求响应前被硬停止，无法获知供应商实际计费，精确费用还需对照供应商账单。
+Agent 的 `completed` 不代表解题成功；官方 `resolved=true` 才计为解决。Agent 限额或失败时如果 runner 仍收集到有效补丁，也会交给官方测试。收集使用临时 Git index，覆盖新增、修改、删除、二进制文件及相对基线的改动，不依赖 Agent 的 `patch_exported` 标记，不修改实际暂存区。空补丁属于 `empty_patch`，收集失败属于错误；二者分开统计。汇总的请求数/Token 累计所有已保存的 attempt；若进程在请求响应前被硬停止，无法获知供应商实际计费，精确费用还需对照供应商账单。
 
 正常完成流水线返回 0，存在环境/执行错误或未完成题目返回 1，用户中断返回 130。补丁未通过测试属于正常的 `unresolved` 结果，不代表驱动崩溃。
 

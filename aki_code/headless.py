@@ -56,6 +56,11 @@ def parser():
     run.add_argument("--output-dir", type=Path, required=True, help="New directory outside workspace")
     run.add_argument("--permission-mode", choices=[mode.value for mode in PermissionMode], default="default")
     run.add_argument("--goal", help="Optional verifiable completion condition")
+    run.add_argument("--execution-profile", choices=["coding", "benchmark"], default="coding",
+                     help="Benchmark permissions are only for disposable Linux containers")
+    run.add_argument("--scratch-dir", type=Path, help="Dedicated writable temporary directory for benchmark mode")
+    run.add_argument("--patch-export", choices=["local", "runner"], default="local",
+                     help="Let an external runner collect the final patch instead of exporting locally")
     run.add_argument("--max-turns", type=_positive_int, default=30)
     run.add_argument("--max-calls", type=_positive_int, default=60)
     run.add_argument("--max-tokens", type=_positive_int, default=100000)
@@ -80,6 +85,8 @@ def execute_task(request, recorder, *, client=None):
             console=Console(file=sys.stderr, force_terminal=False, color_system=None),
             ask_permission=control.require_permission, event_sink=recorder.emit,
             permission_mode=PermissionMode(request["permission_mode"]),
+            benchmark_scratch=request.get("scratch_dir"),
+            permission_observer=control.observe_benchmark_permission,
         )
         recorder.runtime = runtime
         runtime.lead_hooks.register(HookEvent.PRE_LLM_CALL, control.before_turn)
@@ -209,6 +216,8 @@ def supervise(request):
               "memory_enabled": False, "timeout_seconds": request["timeout"],
               "limits": request["limits"], "goal_condition": request.get("goal"),
               "status": "error", "reason": "Worker did not start."}
+    result.update(execution_profile=request.get("execution_profile", "coding"),
+                  patch_export=request.get("patch_export", "local"))
     process = None
     log_reader = None
     decoder = io.IncrementalNewlineDecoder(codecs.getincrementaldecoder("utf-8")(errors="replace"), True)
@@ -269,13 +278,15 @@ def supervise(request):
     elif process is not None and process.returncode:
         result.update(status="error", reason=f"Worker exited with code {process.returncode}; see run.log.")
     result["execution_seconds"] = round(time.monotonic() - started, 3)
-    try:
-        export_patch(Path(request["workspace"]), request["base_commit"], directory)
-        result["patch_exported"] = True
-    except Exception as exc:
-        result.update(patch_exported=False, patch_error=str(exc))
-        if result["status"] in {"completed", "achieved"}:
-            result.update(status="error", reason="Task ended but patch export failed.")
+    result["patch_exported"] = False
+    if request.get("patch_export", "local") == "local":
+        try:
+            export_patch(Path(request["workspace"]), request["base_commit"], directory)
+            result["patch_exported"] = True
+        except Exception as exc:
+            result["patch_error"] = str(exc)
+            if result["status"] in {"completed", "achieved"}:
+                result.update(status="error", reason="Task ended but patch export failed.")
     result["exit_code"] = EXIT_CODES.get(result["status"], 1)
     result["elapsed_seconds"] = round(time.monotonic() - started, 3)
     result["finished_at"] = datetime.now(timezone.utc).isoformat()
@@ -306,15 +317,29 @@ def main(argv=None):
         output = args.output_dir.expanduser().resolve()
         if output.is_relative_to(workspace):
             raise ValueError("Output directory must be outside the workspace.")
+        scratch = args.scratch_dir.expanduser().resolve() if args.scratch_dir else None
+        if args.execution_profile == "benchmark":
+            if os.name != "posix" or scratch is None or not scratch.is_dir():
+                raise ValueError("Benchmark mode needs POSIX and an existing dedicated --scratch-dir.")
+            if args.permission_mode != "accept-edits" or args.patch_export != "runner":
+                raise ValueError("Benchmark mode requires --permission-mode accept-edits --patch-export runner.")
+            if (scratch.is_relative_to(workspace) or workspace.is_relative_to(scratch)
+                    or scratch.is_relative_to(output) or output.is_relative_to(scratch)):
+                raise ValueError("Benchmark scratch, workspace and output directories must be separate.")
+            os.environ["TMPDIR"] = str(scratch)
+        elif scratch is not None:
+            raise ValueError("--scratch-dir requires --execution-profile benchmark.")
         base = validate_workspace(workspace)
         output.mkdir(parents=True, exist_ok=False)
         directory = output
-        for name in ("events.jsonl", "run.log", "patch.diff"):
+        for name in ("events.jsonl", "run.log") + (("patch.diff",) if args.patch_export == "local" else ()):
             (output / name).touch()
         write_json(output / "messages.json", [])
         request = {"task": task, "workspace": str(workspace), "output_dir": str(output),
                    "base_commit": base, "permission_mode": args.permission_mode,
                    "goal": args.goal, "timeout": args.timeout,
+                   "execution_profile": args.execution_profile, "patch_export": args.patch_export,
+                   "scratch_dir": str(scratch) if scratch else None,
                    "limits": {"max_turns": args.max_turns, "max_calls": args.max_calls,
                               "max_tokens": args.max_tokens}}
         write_json(output / "request.json", request)

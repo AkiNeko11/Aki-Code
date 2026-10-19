@@ -36,6 +36,8 @@ class RunControl:
         self.attempts = 0
         self.tracker = TokenTracker()
         self._lock = threading.RLock()
+        self._last_denial = None
+        self._repeated_denials = 0
 
     def snapshot(self):
         with self._lock:
@@ -73,6 +75,22 @@ class RunControl:
         self.emit({"type": "permission_required", "tool_name": name,
                    "tool_input": tool_input, "reason": reason})
         raise RunStopped("blocked", f"Approval required for {name}: {reason}")
+
+    def observe_benchmark_permission(self, name, tool_input, decision, reason):
+        """Denial is normal tool feedback; stop three consecutive identical denials."""
+        with self._lock:
+            if decision == "allow":
+                self._last_denial = None
+                self._repeated_denials = 0
+                return
+            key = (name, reason)
+            self._repeated_denials = self._repeated_denials + 1 if key == self._last_denial else 1
+            self._last_denial = key
+            count = self._repeated_denials
+        self.emit({"type": "permission_denied", "tool_name": name, "tool_input": tool_input,
+                   "reason": reason, "consecutive_denials": count})
+        if count >= 3:
+            raise RunStopped("blocked", f"Repeated permission denial ({count}): {reason}")
 
 
 class BudgetClient:

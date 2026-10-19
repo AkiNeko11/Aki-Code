@@ -9,6 +9,7 @@ import shlex
 import tarfile
 import threading
 import time
+import traceback
 
 from .common import task_text, write_json
 
@@ -34,28 +35,49 @@ def test_spec(row, manifest):
 
 def ensure_image(client, spec, log_path):
     import docker
-    try:
-        image = client.images.get(spec.instance_image_key)
-        return image, True
-    except docker.errors.ImageNotFound:
-        pass
+    import requests
+    preexisting = None
     with log_path.open("w", encoding="utf-8") as log:
-        if spec.namespace is None:
-            from contextlib import redirect_stderr, redirect_stdout
-            from swebench.harness.docker_build import build_instance_images
-            # This driver is serial: the official builder can safely use cwd/logs.
-            with redirect_stdout(log), redirect_stderr(log):
-                _, failures = build_instance_images(client, [spec], False, 1)
-            if failures:
-                raise RuntimeError("Official image build failed; see image-build.log.")
-        else:
-            for event in client.api.pull(spec.instance_image_key, platform=PLATFORM,
-                                         stream=True, decode=True):
-                log.write(json.dumps(event) + "\n")
+        for attempt in range(1, 4):
+            phase = "lookup"
+            log.write(f"attempt={attempt}/3 phase={phase} image={spec.instance_image_key}\n")
+            log.flush()
+            try:
+                try:
+                    image = client.images.get(spec.instance_image_key)
+                except docker.errors.ImageNotFound:
+                    preexisting = False
+                else:
+                    return image, preexisting is not False
+                phase = "build" if spec.namespace is None else "pull"
+                log.write(f"phase={phase}\n")
                 log.flush()
-                if event.get("error"):
-                    raise RuntimeError("Image pull failed; see image-build.log.")
-    return client.images.get(spec.instance_image_key), False
+                if spec.namespace is None:
+                    from contextlib import redirect_stderr, redirect_stdout
+                    from swebench.harness.docker_build import build_instance_images
+                    # This driver is serial: official builder logs can use cwd.
+                    with redirect_stdout(log), redirect_stderr(log):
+                        _, failures = build_instance_images(client, [spec], False, 1)
+                    if failures:
+                        raise RuntimeError("Official image build failed; see image-build.log.")
+                else:
+                    for event in client.api.pull(spec.instance_image_key, platform=PLATFORM,
+                                                 stream=True, decode=True):
+                        log.write(json.dumps(event) + "\n")
+                        log.flush()
+                        if event.get("error"):
+                            raise RuntimeError("Image pull failed; see image-build.log.")
+                phase = "verify"
+                return client.images.get(spec.instance_image_key), False
+            except Exception as exc:
+                log.write(f"phase={phase} failed\n{traceback.format_exc()}\n")
+                transient = isinstance(exc, (requests.ConnectionError, requests.Timeout)) or (
+                    isinstance(exc, docker.errors.APIError) and exc.status_code in {500, 502, 503, 504})
+                if not transient or phase == "build" or attempt == 3:
+                    raise
+                log.write("Retrying transient Docker connection/service failure.\n")
+                log.flush()
+                time.sleep(attempt)
 
 
 def put_files(container, destination, files):
@@ -70,7 +92,8 @@ def put_files(container, destination, files):
         raise RuntimeError("Could not copy inputs into inference container.")
 
 
-def execute(container, command, log_path, timeout, *, environment=None, workdir="/", append=False):
+def execute(container, command, log_path, timeout, *, environment=None, workdir="/", append=False,
+            stderr_path=None, on_cancel=None):
     """Bound Docker exec, whose streaming socket otherwise has no wall deadline."""
     execution = container.client.api.exec_create(
         container.id, command, stdout=True, stderr=True, stdin=False,
@@ -78,14 +101,26 @@ def execute(container, command, log_path, timeout, *, environment=None, workdir=
     )["Id"]
     errors = []
 
+    def cancel():
+        if on_cancel is not None:
+            try:
+                on_cancel()
+                return
+            except Exception:
+                pass
+        container.kill()
+
     def consume():
         try:
-            with log_path.open("ab" if append else "wb") as log:
+            from contextlib import ExitStack
+            with ExitStack() as stack:
+                log = stack.enter_context(log_path.open("ab" if append else "wb"))
+                error_log = stack.enter_context(stderr_path.open("ab")) if stderr_path else log
                 for stdout, stderr in container.client.api.exec_start(execution, stream=True, demux=True):
-                    for chunk in (stdout, stderr):
+                    for chunk, target in ((stdout, log), (stderr, error_log)):
                         if chunk:
-                            log.write(chunk)
-                            log.flush()
+                            target.write(chunk)
+                            target.flush()
         except Exception as exc:
             errors.append(exc)
 
@@ -94,11 +129,11 @@ def execute(container, command, log_path, timeout, *, environment=None, workdir=
     try:
         reader.join(timeout)
     except BaseException:
-        container.kill()
+        cancel()
         reader.join(5)
         raise
     if reader.is_alive():
-        container.kill()
+        cancel()
         reader.join(5)
         raise TimeoutError(f"Container command exceeded {timeout}s; see {log_path.name}.")
     if errors:
@@ -165,6 +200,8 @@ def infer(client, image, row, manifest, directory, attempt, api_key):
         working_dir="/testbed", user="root", detach=True,
     )
     started = time.monotonic()
+    agent_started = False
+    execution = {"exit_code": None, "status": "error", "phase": "prepare", "reason": "Agent did not start."}
     try:
         container.start()
         # Reset only the disposable container checkout, never a host Git workspace.
@@ -175,7 +212,7 @@ def infer(client, image, row, manifest, directory, attempt, api_key):
             f'test "$(git rev-parse HEAD)" = {base}\n'
             'test -z "$(git status --porcelain --untracked-files=all)"\n'
             'test "$(uname -m)" = x86_64\n'
-            "mkdir -p /opt/akicode /akicode-output\n"
+            "mkdir -p /opt/akicode /akicode-output /opt/akicode-runner /tmp/akicode-task\n"
             "/opt/miniconda3/bin/python -c 'import sys; "
             "assert sys.version_info[:2] == (3, 11), "
             '\"Expected Python 3.11 in the official image base\"' + "'\n"
@@ -186,6 +223,10 @@ def infer(client, image, row, manifest, directory, attempt, api_key):
             raise RuntimeError("Inference workspace preparation failed; see prepare.log.")
         if not container.put_archive("/opt/akicode", (directory / "agent-source.tar").read_bytes()):
             raise RuntimeError("Could not copy Agent source.")
+        put_files(container, "/opt/akicode-runner", {
+            "owner": manifest["run_id"].encode(),
+            "collector.py": Path(__file__).with_name("collector.py").read_bytes(),
+        })
         files = {"task.txt": task_text(row).encode("utf-8"),
                  "agent-requirements.txt": (directory / "agent-requirements.txt").read_bytes()}
         files.update({f"wheels/{path.name}": path.read_bytes()
@@ -199,6 +240,8 @@ def infer(client, image, row, manifest, directory, attempt, api_key):
         command = ["/opt/akicode-venv/bin/python", "-m", "aki_code.main", "run",
                    "--task-file", "/opt/akicode/task.txt", "--workspace", "/testbed",
                    "--output-dir", "/akicode-output/run", "--permission-mode", "accept-edits",
+                   "--execution-profile", "benchmark", "--scratch-dir", "/tmp/akicode-task",
+                   "--patch-export", "runner",
                    "--max-turns", str(limits["max_turns"]), "--max-calls", str(limits["max_calls"]),
                    "--max-tokens", str(limits["max_tokens"]), "--timeout", str(limits["timeout"])]
         if manifest["goal"]:
@@ -206,21 +249,71 @@ def infer(client, image, row, manifest, directory, attempt, api_key):
         env = {**manifest["environment"], "DEEPSEEK_API_KEY": api_key,
                "PYTHONPATH": "/opt/akicode", "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1",
                "SKILLS_DIR": "/opt/akicode/skills",
+               "TMPDIR": "/tmp/akicode-task", "TMP": "/tmp/akicode-task", "TEMP": "/tmp/akicode-task",
                "PATH": "/opt/miniconda3/envs/testbed/bin:/usr/local/sbin:/usr/local/bin:"
                        "/usr/sbin:/usr/bin:/sbin:/bin:/opt/miniconda3/bin"}
+        agent_started = True
+        execution["phase"] = "agent"
         exit_code = execute(container, command, attempt / "agent-console.log",
-                            limits["timeout"] + 60, environment=env, workdir="/opt/akicode")
-        write_json(attempt / "execution.json", {"exit_code": exit_code,
-                   "elapsed_seconds": round(time.monotonic() - started, 3)})
+                            limits["timeout"] + 60, environment=env, workdir="/opt/akicode",
+                            on_cancel=lambda: quiesce_agent(container, attempt))
+        execution.update(exit_code=exit_code, status="exited", reason="")
+    except BaseException as exc:
+        execution.update(status="interrupted" if isinstance(exc, KeyboardInterrupt) else
+                         "timeout" if isinstance(exc, TimeoutError) else "error", reason=f"{type(exc).__name__}: {exc}")
+        (attempt / "inference-error.log").write_text(traceback.format_exc(), encoding="utf-8")
+        raise
     finally:
+        execution["elapsed_seconds"] = round(time.monotonic() - started, 3)
+        execution["agent_started"] = agent_started
+        write_json(attempt / "execution.json", execution)
+        warnings = []
         try:
-            # Stop detached jobs before copying a stable set of run artifacts.
-            container.reload()
-            if container.status == "running":
-                container.stop(timeout=2)
-            copy_outputs(container, attempt)
+            if agent_started:
+                collect_patch(container, row, attempt)
         finally:
-            container.remove(force=True)
+            # A failed collection or stop must not suppress copying diagnostics
+            # or removing this owned container, or mask the original exception.
+            for operation in (lambda: container.stop(timeout=2),
+                              lambda: copy_outputs(container, attempt),
+                              lambda: container.remove(force=True)):
+                try:
+                    operation()
+                except Exception as exc:
+                    warnings.append(f"{type(exc).__name__}: {exc}")
+            if warnings:
+                execution["cleanup_warnings"] = warnings
+                write_json(attempt / "execution.json", execution)
+
+
+def quiesce_agent(container, attempt):
+    command = ["/opt/miniconda3/bin/python", "/opt/akicode-runner/collector.py", "--quiesce-only"]
+    if execute(container, command, attempt / "quiesce.log", 30):
+        raise RuntimeError("Could not stop Agent processes; see quiesce.log.")
+
+
+def collect_patch(container, row, attempt):
+    """Independent of Agent result.json and local patch export; stdout is the patch."""
+    patch = attempt / "patch.diff"
+    metadata = {"collector": "runner", "base_commit": row["base_commit"], "status": "unavailable"}
+    try:
+        container.reload()
+        if container.status != "running":
+            raise RuntimeError("Inference container is not running; cannot collect Git changes.")
+        command = ["/opt/miniconda3/bin/python", "/opt/akicode-runner/collector.py",
+                   "--base-commit", row["base_commit"]]
+        if execute(container, command, patch, 200, stderr_path=attempt / "patch-collection.log"):
+            raise RuntimeError("Runner patch collection failed; see patch-collection.log.")
+        from .common import digest
+        size = patch.stat().st_size
+        metadata.update(status="nonempty" if size else "empty", bytes=size, sha256=digest(patch))
+    except Exception as exc:
+        metadata["reason"] = f"{type(exc).__name__}: {exc}"
+        if patch.exists():
+            patch.replace(attempt / "patch.partial")
+    finally:
+        write_json(attempt / "patch.json", metadata)
+    return metadata
 
 
 def cleanup_run_containers(client, run_id):

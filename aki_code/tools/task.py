@@ -54,6 +54,10 @@ class TaskTool(BaseTool):
         self._workspace = workspace
 
     def execute(self, *, prompt: str) -> str:
+        system = build_subagent_prompt(self._workspace)
+        policy_prompt = getattr(self._permission_manager, "prompt_section", None)
+        if policy_prompt is not None:
+            system += policy_prompt()
         return run_subagent(
             prompt=prompt,
             client=self._client,
@@ -61,6 +65,6 @@ class TaskTool(BaseTool):
             permission_manager=self._permission_manager,
             hook_manager=self._hook_manager,
             ask_permission=self._ask_permission,
-            system=build_subagent_prompt(self._workspace),
+            system=system,
             console=self._console,
         )

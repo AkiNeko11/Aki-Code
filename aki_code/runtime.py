@@ -70,7 +70,8 @@ class AgentRuntime:
 
     def __init__(self, *, workspace=None, state_dir=None, profile="interactive",
                  client=None, console=None, ask_permission=None, event_sink=None,
-                 permission_mode=PermissionMode.DEFAULT):
+                 permission_mode=PermissionMode.DEFAULT, benchmark_scratch=None,
+                 permission_observer=None):
         console = console if console is not None else Console()
         def emit(event):
             if event_sink is not None:
@@ -88,6 +89,14 @@ class AgentRuntime:
             allowed_dirs=[str(workspace)], base_dir=workspace, mode=permission_mode,
             readable_dirs=readable_dirs,
         )
+        if benchmark_scratch is not None:
+            if not coding or state_dir is None:
+                raise ValueError("Benchmark permissions require the coding profile and isolated state.")
+            from aki_code.security.benchmark import BenchmarkPermissionManager
+            permission_manager = BenchmarkPermissionManager(
+                workspace=workspace, scratch_dir=benchmark_scratch, output_dir=state_dir.parent,
+                readable_dirs=readable_dirs, on_decision=permission_observer,
+            )
 
         settings = SessionSettings(show_hooks=not coding)
         hook_manager = HookManager()
@@ -293,7 +302,7 @@ class AgentRuntime:
                 prompt += (
                     "\n\n# Automated task\n"
                     "There is no interactive terminal. Complete the supplied task using "
-                    "the available tools. Actions requiring human approval stop the run. "
+                    "the available tools. "
                     "Run verification commands directly so the tool's exit code reflects "
                     "the actual test process; avoid appending echo or other commands that "
                     "mask failure. Leave code changes in the working tree for patch export; "
@@ -303,6 +312,10 @@ class AgentRuntime:
                     "and a small limit (for example 100 lines) to inspect them. "
                     "Shell access to those archives is denied."
                 )
+                if benchmark_scratch is not None:
+                    prompt += permission_manager.prompt_section()
+                else:
+                    prompt += " Actions requiring human approval stop the run."
             return prompt
 
         def _background_observed(record):

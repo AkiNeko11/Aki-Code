@@ -1,0 +1,5 @@
+# Keep checksummed analysis artifacts byte-for-byte identical on Windows.
+analysis/**/report.md -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+analysis/**/SHA256SUMS -text whitespace=blank-at-eol,blank-at-eof,space-before-tab,cr-at-eol
+analysis/**/*.xlsx binary
+analysis/**/*.zip binary

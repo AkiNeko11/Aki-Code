@@ -4,6 +4,8 @@
 
 默认仅运行 `sympy__sympy-20590`；完整数据集需要显式指定 `--all`。默认先验证参考补丁，验证通过后才调用模型。`run` 会消耗真实 API；`doctor`、`validate`、`grade` 和 `status` 不调用模型。
 
+2026-10-20 已完成一批完整 Lite `test` 300 题运行，最新 attempt 通过 214 题（71.33%）。成绩口径、逐题归因、重试及额外资料访问条件见 [分析索引](../../analysis/README.md) 和 [核心报告](../../analysis/swebench_lite_20261020/report.md)。完整分析 ZIP 随报告保存；原始 `task_output-wsl/` 及其 `.task_outputs/archives/` 本地 ZIP 由 Git 忽略，不随仓库发布。
+
 ## 1. MacBook / Mac mini 安装
 
 需要 Git、**Python 3.11+**、已经启动的 Docker Desktop，以及可访问 GitHub、Hugging Face、PyPI、Docker Hub 和模型 API 的网络。建议使用独立的 Python 3.11 环境。Docker 必须运行 Linux 容器。

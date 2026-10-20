@@ -14,3 +14,12 @@ build/
 .mailboxes/
 .worktrees/
 .workflows/
+
+# Raw benchmark runs and their local archives must stay off GitHub.
+/task_output-wsl/
+/task_output_wsl/
+/task_output-wsl*.zip
+/task_output_wsl*.zip
+
+# Analysis archives are publishable; bundled dependency directories are not.
+/analysis/**/node_modules/

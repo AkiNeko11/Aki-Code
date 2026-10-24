@@ -24,7 +24,13 @@
 
 ## 2. 运行演示
 
-> 待补充：真实终端录屏或 GIF，展示一次“读取代码 → 修改实现 → 运行验证 → 完成任务”的完整过程。
+下面的动图展示 Aki-Code 修复 Markdown 链接检查器的过程：复现子目录链接误报，输入自然语言任务，由 Agent 读取代码、修复实现、补充回归测试并运行验证。点击动图可打开完整 MP4 录屏。
+
+[![Aki-Code 终端运行演示：修复 Markdown 相对链接解析](demos/demo.gif)](demos/demo.mp4)
+
+[▶ 观看完整演示（MP4，约 1 分 14 秒）](demos/demo.mp4)
+
+演示使用的项目模板、任务提示词及 Windows 操作步骤见 [Markdown 链接检查器演示用例](demos/markdown-link-checker/README.md)。
 
 ## 3. 核心能力
 

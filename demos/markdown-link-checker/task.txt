@@ -1,0 +1,1 @@
+这个 Markdown 链接检查工具有个问题：从项目根目录运行 python -m linkcheck docs/guide.md 时，会把实际存在的 ../README.md 和 notes/design.md#local-links 误报为不存在。请先复现并定位问题，再修复本地相对链接的解析，保持外部 URL、页内锚点、带 fragment 的本地链接和 URL 编码路径的既有行为。请勿修改现有 Markdown 示例和 tests/test_checker.py；如需补充回归测试，请新建测试文件。使用现有 Python 标准库环境，运行 python -m unittest discover -s tests -v，并再次执行前面的检查命令确认通过。最后简要说明问题原因、修改内容和验证结果。
